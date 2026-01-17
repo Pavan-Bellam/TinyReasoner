@@ -4,4 +4,6 @@ version = "0.1.0"
 description = "Emergent Reasoning via Reinforcement Learning"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "datasets>=4.5.0",
+]
