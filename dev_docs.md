@@ -86,6 +86,53 @@ Natalia sold 48+24 = <<48+24=72>>72 clips altogether.
 
 ---
 
+### 2026-01-18: Baseline Evaluation
+
+**What was done:**
+- Created `src/evaluate.py` for evaluating models on GSM8K
+- Ran baseline evaluation on Qwen2.5-0.5B-Instruct
+- Established baseline accuracy: **42.38%** (559/1319)
+
+**Model choice: Qwen2.5-0.5B-Instruct**
+- 0.5B parameters - matches our target size
+- Instruct-tuned - can follow prompts for math reasoning
+- Good baseline to measure improvement from GRPO training
+
+**Evaluation script design:**
+
+1. **Answer extraction pipeline** (priority order):
+   - `\boxed{}` - Qwen's preferred format for final answers
+   - `<answer>` tags - for future SFT format compatibility
+   - `####` - GSM8K's native format
+   - Last number fallback - catches unformatted responses
+
+2. **Answer normalization:**
+   - Strips whitespace, commas, `$`, `%`
+   - Converts to canonical numeric form (e.g., "72.0" -> "72")
+   - Handles both integers and decimals
+
+3. **Batched inference:**
+   - Left-padding for efficient batch generation
+   - Configurable batch size (default: 4)
+   - Uses greedy decoding (`do_sample=False`) for reproducibility
+
+4. **Output format:**
+   - Summary JSON with accuracy metrics
+   - Detailed JSONL with per-example predictions
+   - Saved to `eval_results/` directory
+
+**Prompt format:**
+```
+System: Please reason step by step, and put your final answer within \boxed{}.
+User: [question]
+```
+
+**Baseline results analysis:**
+- 42.38% accuracy is reasonable for a 0.5B model without specialized training
+
+
+---
+
 ## Architecture Decisions
 
 ### Why GRPO?
@@ -127,23 +174,45 @@ Math problems have objectively correct answers. This gives us:
 python src/process_data.py
 ```
 
+### `src/evaluate.py`
+
+| Function | Purpose |
+|----------|---------|
+| `normalize_answer(answer)` | Normalizes answer to canonical numeric form |
+| `extract_answer(response)` | Extracts answer from model response (boxed/tags/####/fallback) |
+| `evaluate(...)` | Main evaluation loop with batched inference |
+| `EvalResult` | Dataclass for storing evaluation metrics |
+
+**Usage:**
+```bash
+# Full test set
+python src/evaluate.py --model Qwen/Qwen2.5-0.5B-Instruct
+
+# Quick test with subset
+python src/evaluate.py --model Qwen/Qwen2.5-0.5B-Instruct --subset 100
+```
+
 ---
 
 ## Next Steps
 
-1. **Model Selection**
-   - Choose a 0.5B base model (e.g., Qwen-0.5B, SmolLM-360M)
-   - Set up model loading with transformers
+1. ~~**Model Selection**~~ ✓
+   - ~~Choose a 0.5B base model~~ → Qwen2.5-0.5B-Instruct
+   - ~~Set up model loading with transformers~~
 
-2. **Training Infrastructure**
+2. ~~**Baseline Evaluation**~~ ✓
+   - ~~Accuracy on GSM8K test set~~ → 42.38%
+   - Established target to beat with GRPO
+
+3. **Training Infrastructure**
    - Implement GRPO training loop
    - Set up reward computation (answer matching)
    - Configure logging and checkpointing
 
-3. **Evaluation**
-   - Accuracy on GSM8K test set
+4. **Post-Training Evaluation**
+   - Compare trained model vs baseline
    - Analysis of generated reasoning chains
-   - Comparison with baseline (no RL)
+   - Measure improvement from GRPO
 
 ---
 
@@ -152,8 +221,11 @@ python src/process_data.py
 | Package | Version | Purpose |
 |---------|---------|---------|
 | datasets | >=4.5.0 | Loading and processing datasets |
+| transformers | - | Model loading and tokenization |
+| torch | - | GPU-accelerated inference |
+| tqdm | - | Progress bars |
 
-*Future dependencies will be added as training infrastructure is built.*
+*Additional dependencies will be added as training infrastructure is built.*
 
 ---
 
@@ -162,10 +234,12 @@ python src/process_data.py
 ```
 tinyreasoner/
 ├── src/
-│   └── process_data.py    # Data processing script
+│   ├── process_data.py    # Data processing script
+│   └── evaluate.py        # Model evaluation script
 ├── data/                   # Processed datasets (gitignored)
 │   ├── gsm8k_train/       # Arrow format, 7,473 examples
 │   └── gsm8k_test/        # Arrow format, 1,319 examples
+├── eval_results/           # Evaluation outputs (gitignored)
 ├── dev_docs.md            # This file
 ├── pyproject.toml         # Project configuration
 ├── uv.lock                # Locked dependencies
@@ -186,6 +260,12 @@ uv sync
 
 # Process GSM8K data
 python src/process_data.py
+
+# Evaluate model on GSM8K
+python src/evaluate.py --model Qwen/Qwen2.5-0.5B-Instruct
+
+# Quick evaluation on subset
+python src/evaluate.py --model Qwen/Qwen2.5-0.5B-Instruct --subset 100
 
 # Load processed data in Python
 from datasets import load_from_disk

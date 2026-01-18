@@ -42,15 +42,38 @@ This will:
 3. Extract question, chain-of-thought reasoning, and final answer
 4. Save processed data to `data/gsm8k_train` and `data/gsm8k_test`
 
+### Evaluation
+
+Evaluate a model on GSM8K test set:
+
+```bash
+python src/evaluate.py --model Qwen/Qwen2.5-0.5B-Instruct
+```
+
+Options:
+- `--model` - Model path or HuggingFace model ID (default: `Qwen/Qwen2.5-0.5B-Instruct`)
+- `--data` - Path to test data (default: `data/gsm8k_test`)
+- `--batch_size` - Batch size for inference (default: 4)
+- `--max_tokens` - Max new tokens to generate (default: 512)
+- `--subset` - Evaluate on first N examples only
+
+## Baseline Results
+
+| Model | GSM8K Accuracy |
+|-------|----------------|
+| Qwen2.5-0.5B-Instruct (baseline) | **42.38%** (559/1319) |
+
 ## Project Structure
 
 ```
 tinyreasoner/
 ├── src/
-│   └── process_data.py    # GSM8K dataset processing
+│   ├── process_data.py    # GSM8K dataset processing
+│   └── evaluate.py        # Model evaluation on GSM8K
 ├── data/                   # Processed datasets (gitignored)
 │   ├── gsm8k_train/       # 7,473 training examples
 │   └── gsm8k_test/        # 1,319 test examples
+├── eval_results/           # Evaluation outputs (gitignored)
 ├── dev_docs.md            # Development documentation
 ├── pyproject.toml         # Project config and dependencies
 └── README.md
@@ -70,6 +93,8 @@ Using [OpenAI's GSM8K](https://huggingface.co/datasets/openai/gsm8k) - Grade Sch
 ## Dependencies
 
 - `datasets` - Hugging Face datasets library
+- `transformers` - Model loading and inference
+- `torch` - PyTorch for GPU acceleration
 
 ## License
 
