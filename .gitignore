@@ -208,4 +208,6 @@ __marimo__/
 
 #project
 data
-./brainstrom.md
+eval_results
+
+brainstrom
