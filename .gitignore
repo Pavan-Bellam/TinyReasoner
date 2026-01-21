@@ -206,8 +206,13 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 
-#project
-data
-eval_results
+# Project specific
+data/
+eval_results/
+checkpointing/
+grpo_checkpoints/
+wandb/
+brainstrom.md
+src/test.py
+src/sample.py
 
-brainstrom
