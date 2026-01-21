@@ -1,100 +1,145 @@
 # TinyReasoner
 
-Replicating DeepSeek-R1's emergent reasoning behavior on a 0.5B parameter model using GRPO (Group Relative Policy Optimization) with verifiable rewards.
+Exploring emergent reasoning behavior with supervised fine-tuning (SFT) on GSM8K-style chain-of-thought data.
 
 ## Overview
 
-TinyReasoner is a research project exploring whether small language models can develop emergent reasoning capabilities through reinforcement learning. Inspired by DeepSeek-R1's findings, we aim to train a tiny (0.5B) model to exhibit chain-of-thought reasoning without explicit supervision.
+TinyReasoner investigates whether language models can learn to emit structured reasoning and answers via SFT. The training format enforces:
 
-## Goals
-
-- Train a 0.5B parameter model to solve grade-school math problems
-- Use GRPO with verifiable rewards (correct/incorrect answers)
-- Observe emergent reasoning patterns in the model's outputs
-- Document the training process and findings
+```
+<think>...</think>
+<answer>...</answer>
+```
 
 ## Installation
 
 Requires Python 3.12+ and [uv](https://github.com/astral-sh/uv) package manager.
 
 ```bash
-# Clone the repository
 git clone <repo-url>
 cd tinyreasoner
-
-# Create virtual environment and install dependencies
 uv sync
 ```
 
-## Usage
+## Quick Start
 
-### Data Processing
-
-Process the GSM8K dataset for training:
+### 1. Process Data
 
 ```bash
 python src/process_data.py
 ```
 
-This will:
-1. Download the GSM8K dataset from Hugging Face
-2. Clean calculator annotations (e.g., `<<5*3=15>>`)
-3. Extract question, chain-of-thought reasoning, and final answer
-4. Save processed data to `data/gsm8k_train` and `data/gsm8k_test`
-
-### Evaluation
-
-Evaluate a model on GSM8K test set:
+### 2. Train SFT Model
 
 ```bash
-python src/evaluate.py --model Qwen/Qwen2.5-0.5B-Instruct
+python src/sft.py --config config.yml
 ```
 
-Options:
-- `--model` - Model path or HuggingFace model ID (default: `Qwen/Qwen2.5-0.5B-Instruct`)
-- `--data` - Path to test data (default: `data/gsm8k_test`)
-- `--batch_size` - Batch size for inference (default: 4)
-- `--max_tokens` - Max new tokens to generate (default: 512)
-- `--subset` - Evaluate on first N examples only
+### 3. Evaluate
 
-## Baseline Results
+Baseline evaluation on the base model:
+
+```bash
+python src/eval/baseline.py --model <base-model-id> --subset 100
+```
+
+Evaluate an SFT adapter:
+
+```bash
+python src/eval/sft.py \
+  --base-model <base-model-id> \
+  --adapter ./checkpointing/checkpoint-500 \
+  --test-data data/gsm8k_test \
+  --output eval_results/sft_eval.json \
+  --limit 100
+```
+
+## Training
+
+### SFT (Supervised Fine-Tuning)
+
+Trains the model to output in the expected `<think>/<answer>` format using chain-of-thought examples.
+
+```bash
+# Start fresh
+python src/sft.py --config config.yml
+
+# Resume from checkpoint (continues optimizer state)
+python src/sft.py --config config.yml --resume ./checkpointing/checkpoint-500
+
+# Initialize weights but start fresh training
+python src/sft.py --config config.yml --init-from ./checkpointing/checkpoint-500
+```
+
+## Configuration
+
+All training parameters are in `config.yml`:
+
+```yaml
+model:
+  path: "<base-model-id>"
+
+quant:
+  enabled: True
+  load_in_4bit: True
+  bnb_4bit_compute_dtype: "bfloat16"
+  bnb_4bit_quant_type: "nf4"
+
+lora:
+  r: 16
+  alpha: 32
+  dropout: 0.05
+  target_modules: ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+
+data:
+  path: "data/gsm8k_train"
+  eval_path: "data/gsm8k_test"
+
+train:
+  epochs: 3
+  learning_rate: 0.0002
+  per_device_train_batch_size: 4
+  gradient_accumulation_steps: 4
+
+ckpt:
+  output_dir: "./checkpointing"
+```
+
+## Results
 
 | Model | GSM8K Accuracy |
 |-------|----------------|
-| Qwen2.5-0.5B-Instruct (baseline) | **42.38%** (559/1319) |
+| Baseline (example) | 42.38% |
+| + SFT | TBD |
 
 ## Project Structure
 
 ```
 tinyreasoner/
-├── src/
-│   ├── process_data.py    # GSM8K dataset processing
-│   └── evaluate.py        # Model evaluation on GSM8K
-├── data/                   # Processed datasets (gitignored)
-│   ├── gsm8k_train/       # 7,473 training examples
-│   └── gsm8k_test/        # 1,319 test examples
-├── eval_results/           # Evaluation outputs (gitignored)
-├── dev_docs.md            # Development documentation
-├── pyproject.toml         # Project config and dependencies
-└── README.md
+|-- src/
+|   |-- process_data.py   # GSM8K dataset processing
+|   |-- sft.py            # SFT training script
+|   `-- eval/
+|       |-- baseline.py   # Base model evaluation
+|       `-- sft.py        # SFT adapter evaluation
+|-- data/                 # Processed datasets (gitignored)
+|-- checkpointing/         # SFT checkpoints (gitignored)
+|-- eval_results/          # Evaluation outputs (gitignored)
+|-- config.yml             # Training configuration
+|-- dev_docs.md            # Development documentation
+|-- pyproject.toml         # Project config and dependencies
+`-- README.md
 ```
 
-## Dataset
+## Monitoring
 
-Using [OpenAI's GSM8K](https://huggingface.co/datasets/openai/gsm8k) - Grade School Math 8K, a dataset of 8,792 grade school math word problems with natural language solutions.
+Training logs to Weights & Biases when enabled in config:
 
-**Processed format:**
-| Field | Description |
-|-------|-------------|
-| `question` | The math word problem |
-| `cot` | Chain-of-thought reasoning steps |
-| `answer` | Final numerical answer |
-
-## Dependencies
-
-- `datasets` - Hugging Face datasets library
-- `transformers` - Model loading and inference
-- `torch` - PyTorch for GPU acceleration
+```yaml
+wandb:
+  enabled: True
+  project: "tinyreasoner-sft"
+```
 
 ## License
 

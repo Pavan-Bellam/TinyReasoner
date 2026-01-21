@@ -1,69 +1,35 @@
-# TinyReasoner Development Documentation
-
-A developer diary documenting the design decisions, implementation details, and progress of the TinyReasoner project.
+# TinyReasoner Developer Documentation
 
 ---
 
-## Project Vision
+## Overview
 
-**Goal:** Replicate the emergent reasoning behavior observed in DeepSeek-R1 on a much smaller (0.5B parameter) model using GRPO (Group Relative Policy Optimization) with verifiable rewards.
+**Goal:** Train a model with supervised fine-tuning on GSM8K-style chain-of-thought data and evaluate it using consistent extraction and normalization rules.
 
-**Hypothesis:** By using reinforcement learning with a simple binary reward signal (correct/incorrect answer), a small model can learn to generate intermediate reasoning steps (chain-of-thought) without explicit supervision on the reasoning process itself.
-
-**Why this matters:** If successful, this demonstrates that emergent reasoning doesn't require massive scale - opening doors for more accessible AI reasoning research.
-
----
-
-## Development Log
-
-### 2026-01-16: Project Initialization
-
-**What was done:**
-- Initialized project with `uv` package manager
-- Set up Python 3.12 environment
-- Created basic project structure
-
-**Technical decisions:**
-- **Package manager:** Chose `uv` over `pip` for faster dependency resolution and reproducible builds
-- **Python version:** 3.12+ for modern type hints (`str | None` syntax) and performance improvements
-
----
-
-### 2026-01-16: Data Processing Pipeline
-
-**What was done:**
-- Created `src/process_data.py` to process the GSM8K dataset
-- Successfully processed all 8,792 examples (7,473 train + 1,319 test)
-
-**Dataset: GSM8K**
-
-GSM8K (Grade School Math 8K) is OpenAI's dataset of grade-school math word problems. Each example contains:
-- A natural language math problem
-- A solution with step-by-step reasoning
-- A final numerical answer marked with `####`
-
-**Original format:**
+**Training format:**
 ```
-Question: Natalia sold clips to 48 of her friends in April...
-Answer: Natalia sold 48/2 = <<48/2=24>>24 clips in May.
-Natalia sold 48+24 = <<48+24=72>>72 clips altogether.
-#### 72
+<think>
+[reasoning]
+</think>
+<answer>[final answer]</answer>
 ```
+
+---
+
+## Data Processing Pipeline (`src/process_data.py`)
+
+**Purpose:** Build train/test datasets from GSM8K with clean chain-of-thought and final answer fields.
 
 **Processing steps implemented:**
-
 1. **Clean calculator annotations**
-   - GSM8K includes inline calculator annotations like `<<48/2=24>>`
-   - These are for verification but not needed for training
+   - Removes inline calculator annotations like `<<48/2=24>>`
    - Regex: `re.sub(r'<<.*?>>', '', text)`
 
 2. **Extract chain-of-thought (CoT)**
-   - Everything before `####` is the reasoning process
-   - This becomes the target for the model to learn to generate
+   - Everything before `####` becomes the reasoning target
 
 3. **Extract final answer**
    - The numerical answer after `####`
-   - This is used for the reward signal (verifiable)
 
 **Processed format:**
 ```python
@@ -74,52 +40,25 @@ Natalia sold 48+24 = <<48+24=72>>72 clips altogether.
 }
 ```
 
-**Data statistics:**
-- Train: 7,473 examples (100% retained after filtering)
-- Test: 1,319 examples (100% retained after filtering)
-- All examples contained the `####` delimiter
-
 **Storage:**
-- Saved using Hugging Face `datasets` library's Arrow format
+- Saved using Hugging Face `datasets` Arrow format
 - Location: `data/gsm8k_train/` and `data/gsm8k_test/`
-- Total size: ~4.7 MB
 
 ---
 
-### 2026-01-18: Baseline Evaluation
+## Evaluation Scripts
 
-**What was done:**
-- Created `src/evaluate.py` for evaluating models on GSM8K
-- Ran baseline evaluation on Qwen2.5-0.5B-Instruct
-- Established baseline accuracy: **42.38%** (559/1319)
+### Baseline Evaluation (`src/eval/baseline.py`)
 
-**Model choice: Qwen2.5-0.5B-Instruct**
-- 0.5B parameters - matches our target size
-- Instruct-tuned - can follow prompts for math reasoning
-- Good baseline to measure improvement from GRPO training
-
-**Evaluation script design:**
-
+**Design:**
 1. **Answer extraction pipeline** (priority order):
-   - `\boxed{}` - Qwen's preferred format for final answers
-   - `<answer>` tags - for future SFT format compatibility
-   - `####` - GSM8K's native format
-   - Last number fallback - catches unformatted responses
-
+   - `\boxed{}` -> `<answer>` tags -> `####` -> last number fallback
 2. **Answer normalization:**
    - Strips whitespace, commas, `$`, `%`
-   - Converts to canonical numeric form (e.g., "72.0" -> "72")
-   - Handles both integers and decimals
-
+   - Converts to canonical numeric form
 3. **Batched inference:**
    - Left-padding for efficient batch generation
-   - Configurable batch size (default: 4)
-   - Uses greedy decoding (`do_sample=False`) for reproducibility
-
-4. **Output format:**
-   - Summary JSON with accuracy metrics
-   - Detailed JSONL with per-example predictions
-   - Saved to `eval_results/` directory
+   - Greedy decoding for reproducibility
 
 **Prompt format:**
 ```
@@ -127,33 +66,62 @@ System: Please reason step by step, and put your final answer within \boxed{}.
 User: [question]
 ```
 
-**Baseline results analysis:**
-- 42.38% accuracy is reasonable for a 0.5B model without specialized training
+### SFT Evaluation (`src/eval/sft.py`)
 
+**Design:**
+- Loads a base model and a LoRA adapter
+- Generates deterministic completions (`do_sample=False`)
+- Parses `<think>...</think><answer>...</answer>` and scores format validity + answer correctness
+- Writes JSON results plus a readable TXT report when `--output` is provided
 
 ---
 
-## Architecture Decisions
+## SFT Training Pipeline (`src/sft.py`)
 
-### Why GRPO?
+**Key features:**
+- Optional 4-bit or 8-bit loading via BitsAndBytes
+- LoRA configuration in `config.yml`
+- Gradient checkpointing support
+- Weights & Biases integration
 
-GRPO (Group Relative Policy Optimization) is a variant of policy gradient methods that:
-- Compares multiple generations against each other (relative rewards)
-- More sample-efficient than standard REINFORCE
-- Used successfully in DeepSeek-R1 for reasoning
+**Flow:**
+1. Load `config.yml` and initialize W&B (if enabled).
+2. Load base model and tokenizer, optionally quantized.
+3. Initialize LoRA adapter (fresh or from checkpoint).
+4. Load dataset from disk and split train/validation.
+5. Configure `SFTConfig` and train with `SFTTrainer`.
 
-### Why verifiable rewards?
+---
 
-Math problems have objectively correct answers. This gives us:
-- **Binary reward:** 1 if answer matches, 0 otherwise
-- **No reward hacking:** Can't game a learned reward model
-- **Clear evaluation:** Easy to measure progress
+## Configuration (`config.yml`)
 
-### Why 0.5B parameters?
+Key sections:
+- `model.path`: base model identifier or path
+- `quant`: BitsAndBytes quantization options
+- `lora`: LoRA adapter hyperparameters
+- `data.path`: dataset on disk (train split source)
+- `data.eval_path`: optional evaluation dataset on disk
+- `train`: SFT hyperparameters (batch size, LR, epochs, eval steps)
+- `ckpt`: checkpoint output settings
+- `logging`: logging frequency
+- `wandb`: experiment tracking
 
-- **Accessibility:** Trainable on consumer hardware
-- **Research speed:** Faster iteration on experiments
-- **Proof of concept:** If reasoning emerges at 0.5B, it's not just about scale
+### Training Config (`train`)
+
+Common fields and how they are used in `src/sft.py`:
+- `epochs`: number of full passes over the training split
+- `per_device_train_batch_size`: micro-batch size per device
+- `per_device_eval_batch_size`: eval batch size per device
+- `gradient_accumulation_steps`: steps to accumulate before optimizer update
+- `learning_rate`: base LR for the optimizer
+- `weight_decay`: L2 regularization
+- `warmup_ratio`: fraction of total steps used for LR warmup
+- `max_grad_norm`: gradient clipping threshold
+- `bf16`: use bfloat16 mixed precision
+- `use_gradient_checkpointing`: saves memory at the cost of speed
+- `eval_steps`: evaluation frequency (in steps)
+- `dataloader_num_workers`: DataLoader worker count (defaults to 0 if unset)
+- `max_length`: maximum sequence length for SFT training (defaults to 512 if unset)
 
 ---
 
@@ -163,69 +131,45 @@ Math problems have objectively correct answers. This gives us:
 
 | Function | Purpose |
 |----------|---------|
-| `clean_calculator_annotations(text)` | Removes `<<...>>` patterns from text |
-| `extract_answer(text)` | Gets content after `####` delimiter |
-| `extract_cot(text)` | Gets content before `####` delimiter |
+| `clean_calculator_annotations(text)` | Removes `<<...>>` patterns |
+| `extract_answer(text)` | Gets content after `####` |
+| `extract_cot(text)` | Gets content before `####` |
 | `process_example(example)` | Processes a single GSM8K example |
-| `main()` | Orchestrates the full pipeline |
+| `main()` | Orchestrates the pipeline |
 
 **Usage:**
 ```bash
 python src/process_data.py
 ```
 
-### `src/evaluate.py`
+### `src/sft.py`
 
 | Function | Purpose |
 |----------|---------|
-| `normalize_answer(answer)` | Normalizes answer to canonical numeric form |
-| `extract_answer(response)` | Extracts answer from model response (boxed/tags/####/fallback) |
-| `evaluate(...)` | Main evaluation loop with batched inference |
-| `EvalResult` | Dataclass for storing evaluation metrics |
+| `setup_quantization(config)` | Builds BitsAndBytes config |
+| `get_lora_config(config)` | Builds LoRA config |
+| `load_model_and_tokenizer(...)` | Loads base model and adapters |
+| `load_data(config)` | Loads and splits dataset |
+| `setup_wandb(config, full_config)` | Initializes W&B |
+| `main(...)` | Orchestrates SFT training |
 
 **Usage:**
 ```bash
-# Full test set
-python src/evaluate.py --model Qwen/Qwen2.5-0.5B-Instruct
-
-# Quick test with subset
-python src/evaluate.py --model Qwen/Qwen2.5-0.5B-Instruct --subset 100
+python src/sft.py --config config.yml
 ```
-
----
-
-## Next Steps
-
-1. ~~**Model Selection**~~ ✓
-   - ~~Choose a 0.5B base model~~ → Qwen2.5-0.5B-Instruct
-   - ~~Set up model loading with transformers~~
-
-2. ~~**Baseline Evaluation**~~ ✓
-   - ~~Accuracy on GSM8K test set~~ → 42.38%
-   - Established target to beat with GRPO
-
-3. **Training Infrastructure**
-   - Implement GRPO training loop
-   - Set up reward computation (answer matching)
-   - Configure logging and checkpointing
-
-4. **Post-Training Evaluation**
-   - Compare trained model vs baseline
-   - Analysis of generated reasoning chains
-   - Measure improvement from GRPO
 
 ---
 
 ## Dependencies
 
-| Package | Version | Purpose |
-|---------|---------|---------|
-| datasets | >=4.5.0 | Loading and processing datasets |
-| transformers | - | Model loading and tokenization |
-| torch | - | GPU-accelerated inference |
-| tqdm | - | Progress bars |
-
-*Additional dependencies will be added as training infrastructure is built.*
+| Package | Purpose |
+|---------|---------|
+| datasets | Loading and processing datasets |
+| transformers | Model loading and tokenization |
+| peft | LoRA adapters |
+| trl | SFTTrainer |
+| torch | GPU-accelerated training |
+| wandb | Experiment tracking |
 
 ---
 
@@ -233,17 +177,18 @@ python src/evaluate.py --model Qwen/Qwen2.5-0.5B-Instruct --subset 100
 
 ```
 tinyreasoner/
-├── src/
-│   ├── process_data.py    # Data processing script
-│   └── evaluate.py        # Model evaluation script
-├── data/                   # Processed datasets (gitignored)
-│   ├── gsm8k_train/       # Arrow format, 7,473 examples
-│   └── gsm8k_test/        # Arrow format, 1,319 examples
-├── eval_results/           # Evaluation outputs (gitignored)
-├── dev_docs.md            # This file
-├── pyproject.toml         # Project configuration
-├── uv.lock                # Locked dependencies
-└── README.md              # Project overview
+|-- src/
+|   |-- process_data.py   # Data processing
+|   |-- sft.py            # SFT training
+|   `-- eval/
+|       |-- baseline.py   # Base model evaluation
+|       `-- sft.py        # SFT adapter evaluation
+|-- data/                 # Processed datasets (gitignored)
+|-- checkpointing/         # SFT checkpoints (gitignored)
+|-- eval_results/          # Evaluation outputs (gitignored)
+|-- dev_docs.md
+|-- pyproject.toml         # Project configuration
+`-- README.md
 ```
 
 ---
@@ -261,22 +206,19 @@ uv sync
 # Process GSM8K data
 python src/process_data.py
 
-# Evaluate model on GSM8K
-python src/evaluate.py --model Qwen/Qwen2.5-0.5B-Instruct
+# Train SFT
+python src/sft.py --config config.yml
 
-# Quick evaluation on subset
-python src/evaluate.py --model Qwen/Qwen2.5-0.5B-Instruct --subset 100
+# Evaluate base model
+python src/eval/baseline.py --model <base-model-id>
 
-# Load processed data in Python
-from datasets import load_from_disk
-train = load_from_disk("data/gsm8k_train")
-test = load_from_disk("data/gsm8k_test")
+# Evaluate SFT adapter
+python src/eval/sft.py --base-model <base-model-id> --adapter ./checkpointing/checkpoint-500 --test-data data/gsm8k_test
 ```
 
 ---
 
 ## References
 
-- [DeepSeek-R1 Paper](https://arxiv.org/abs/2401.02954) - Original work on emergent reasoning
+- [DeepSeek-R1 Paper](https://arxiv.org/abs/2401.02954) - Emergent reasoning background
 - [GSM8K Dataset](https://huggingface.co/datasets/openai/gsm8k) - Grade School Math benchmark
-- [GRPO](https://arxiv.org/abs/2402.03300) - Group Relative Policy Optimization
