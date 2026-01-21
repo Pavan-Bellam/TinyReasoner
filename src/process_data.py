@@ -1,85 +1,136 @@
 import re
-from datasets import load_dataset, Dataset
+from datasets import load_dataset, concatenate_datasets
 
-def clean_calculator_annotations(text: str) -> str:
-    """Remove <<...>> calculator annotations from text."""
-    return re.sub(r'<<.*?>>', '', text)
+SUBSETS = [
+    'algebra', 
+    'counting_and_probability', 
+    'geometry', 
+    'intermediate_algebra', 
+    'number_theory', 
+    'prealgebra', 
+    'precalculus'
+]
 
-def extract_answer(text: str) -> str | None:
-    """Extract final answer thats placed after ####"""
-    if '####' in text:
-        return text.split('####')[-1].strip()
-    return None
 
-def extract_cot(text: str) -> str:
-    """Extract chain of thought (everything before ####)."""
-    if '####' in text:
-        return text.split('####')[0].strip()
-    return text.strip()
+def last_boxed_only_string(string: str) -> str | None:
+    """Extract the last \\boxed{...} or \\fbox{...} element from a string."""
+    idx = string.rfind("\\boxed")
+    if idx < 0:
+        idx = string.rfind("\\fbox")
+        if idx < 0:
+            return None
+
+    i = idx
+    right_brace_idx = None
+    num_left_braces_open = 0
+    while i < len(string):
+        if string[i] == "{":
+            num_left_braces_open += 1
+        if string[i] == "}":
+            num_left_braces_open -= 1
+            if num_left_braces_open == 0:
+                right_brace_idx = i
+                break
+        i += 1
+
+    if right_brace_idx is None:
+        return None
+
+    return string[idx:right_brace_idx + 1]
+
+
+def remove_boxed(s: str) -> str | None:
+    """Remove \\boxed{} wrapper, return inner content."""
+    if s is None:
+        return None
+    if s.startswith("\\boxed{"):
+        return s[7:-1]
+    if s.startswith("\\fbox{"):
+        return s[6:-1]
+    return s
+
+
+def extract_answer(solution: str) -> str | None:
+    """Extract final answer from solution."""
+    boxed = last_boxed_only_string(solution)
+    return remove_boxed(boxed)
+
+
+def extract_cot(solution: str) -> str:
+    """Extract chain of thought (everything before the final boxed answer)."""
+    # Find the last \boxed and return everything before it
+    idx = solution.rfind("\\boxed")
+    if idx < 0:
+        idx = solution.rfind("\\fbox")
+    if idx < 0:
+        return solution.strip()
+    return solution[:idx].strip()
 
 
 def process_example(example: dict) -> dict:
-    """Process a single GSM8K example."""
+    """Process a single MATH example."""
+    answer = extract_answer(example['solution'])
+    cot = extract_cot(example['solution'])
     
-    if 'answer' not in example.keys():
-        return {"question": None, "cot": None, "answer": None}
-    
-    raw_answer = example['answer']
-    
-    # Clean calculator annotations
-    cleaned = clean_calculator_annotations(raw_answer)
-    
-    # Split into CoT and final answer
-    cot = extract_cot(cleaned)
-    answer = extract_answer(cleaned)
-
     return {
-        "question": example['question'],
+        "question": example['problem'],
         "cot": cot,
-        "answer": answer  # Can be None if no ####
+        "answer": answer,
+        "level": example['level'],
+        "type": example['type']
     }
 
 
 def main():
-    print("Loading dataset")
-    ds = load_dataset("openai/gsm8k", "main")
+    print("Loading dataset...")
+    
+    # Load and concatenate all subsets
+    train_datasets = [
+        load_dataset("EleutherAI/hendrycks_math", s, split="train") 
+        for s in SUBSETS
+    ]
+    test_datasets = [
+        load_dataset("EleutherAI/hendrycks_math", s, split="test") 
+        for s in SUBSETS
+    ]
+    
+    train = concatenate_datasets(train_datasets)
+    test = concatenate_datasets(test_datasets)
+    
+    print(f"Train size: {len(train)}")
+    print(f"Test size: {len(test)}")
 
-    print(f"Train size: {len(ds['train'])}")
-    print(f"Test size: {len(ds['test'])}")
+    print("\nProcessing splits...")
+    train_processed = train.map(process_example, remove_columns=train.column_names)
+    test_processed = test.map(process_example, remove_columns=test.column_names)
 
-    print("\nProcessing train split...")
-    train_processed = ds['train'].map(process_example, remove_columns=ds['train'].column_names)
-
-    print("Processing test split...")
-    test_processed = ds['test'].map(process_example, remove_columns=ds['test'].column_names)
-
-    # Remove rows with no answer (no #### in original)
+    # Filter out any rows where answer extraction failed
     train_before = len(train_processed)
     test_before = len(test_processed)
     
     train_processed = train_processed.filter(lambda x: x['answer'] is not None)
     test_processed = test_processed.filter(lambda x: x['answer'] is not None)
-
-    print(f"\nFiltered out rows without ####:")
+    
+    print(f"\nFiltered out rows without boxed answer:")
     print(f"  Train: {train_before} -> {len(train_processed)} (removed {train_before - len(train_processed)})")
     print(f"  Test: {test_before} -> {len(test_processed)} (removed {test_before - len(test_processed)})")
 
     # Show samples
-    print("\n" + "="*50)
+    print("\n" + "="*60)
     print("SAMPLE EXAMPLES")
-    print("="*50)
-    for i in range(2):
+    print("="*60)
+    for i in range(3):
         ex = train_processed[i]
-        print(f"\n--- Example {i+1} ---")
-        print(f"Q: {ex['question'][:80]}...")
-        print(f"COT: {ex['cot'][:100]}...")
+        print(f"\n--- Example {i+1} [{ex['level']}, {ex['type']}] ---")
+        print(f"Q: {ex['question'][:150]}...")
+        print(f"COT: {ex['cot'][:200]}...")
         print(f"A: {ex['answer']}")
 
     # Save
-    train_processed.save_to_disk("data/gsm8k_train")
-    test_processed.save_to_disk("data/gsm8k_test")
+    train_processed.save_to_disk("data/math_train")
+    test_processed.save_to_disk("data/math_test")
     
-    print("\nSaved to data/gsm8k_train and data/gsm8k_test")
+    print(f"\nSaved to data/math_{{train,test}}")
 
 
 if __name__ == "__main__":
