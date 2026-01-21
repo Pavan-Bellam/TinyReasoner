@@ -1,4 +1,5 @@
 import json
+import os
 import torch
 from datasets import load_from_disk
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -9,7 +10,7 @@ import pandas as pd
 MODEL_ID = "Qwen/Qwen2.5-3B-Instruct"
 DATA_PATH = "data/math_test"
 OUTPUT_PATH = "results/baseline_results.jsonl"
-BATCH_SIZE = 1
+BATCH_SIZE = 16  # Start here, increase if VRAM allows
 MAX_NEW_TOKENS = 1024
 
 
@@ -95,6 +96,9 @@ Solution:"""
 def main():
     print(f"Loading model: {MODEL_ID}")
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
+    tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.padding_side = "left"
+    
     model = AutoModelForCausalLM.from_pretrained(
         MODEL_ID,
         torch_dtype=torch.bfloat16,
@@ -106,25 +110,38 @@ def main():
     dataset = load_from_disk(DATA_PATH)
     print(f"Dataset size: {len(dataset)}")
 
-    # Results storage
     results = []
     stats = defaultdict(lambda: defaultdict(lambda: {"correct": 0, "total": 0}))
 
-    print("\nRunning evaluation...")
-    for i, example in enumerate(tqdm(dataset)):
-        question = example["question"]
-        expected = example["answer"]
-        level = example["level"]
-        subject = example["type"]
-
-        # Generate
-        prompt = build_prompt(question)
-        messages = [{"role": "user", "content": prompt}]
-        text = tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
-        inputs = tokenizer(text, return_tensors="pt").to(model.device)
-
+    print(f"\nRunning evaluation with batch size {BATCH_SIZE}...")
+    
+    num_batches = (len(dataset) + BATCH_SIZE - 1) // BATCH_SIZE
+    
+    for batch_start in tqdm(range(0, len(dataset), BATCH_SIZE), total=num_batches):
+        batch_end = min(batch_start + BATCH_SIZE, len(dataset))
+        batch = dataset[batch_start:batch_end]
+        
+        # FIX 1: batch["question"] returns a list, this is correct
+        prompts = []
+        for question in batch["question"]:
+            prompt = build_prompt(question)
+            messages = [{"role": "user", "content": prompt}]
+            text = tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
+            )
+            prompts.append(text)
+        
+        inputs = tokenizer(
+            prompts, 
+            return_tensors="pt", 
+            padding=True,
+            truncation=True,
+            max_length=2048
+        ).to(model.device)
+        
+        # FIX 2: Store input lengths BEFORE generation (padding makes them equal)
+        input_lengths = inputs["attention_mask"].sum(dim=1).tolist()
+        
         with torch.no_grad():
             outputs = model.generate(
                 **inputs,
@@ -132,30 +149,39 @@ def main():
                 do_sample=False,
                 pad_token_id=tokenizer.eos_token_id,
             )
-
-        response = tokenizer.decode(outputs[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True)
-        extracted = extract_answer(response)
-        correct = is_correct(extracted, expected)
-
-        # Store result
-        results.append({
-            "idx": i,
-            "question": question,
-            "expected": expected,
-            "extracted": extracted,
-            "response": response,
-            "correct": correct,
-            "level": level,
-            "type": subject,
-        })
-
-        # Update stats
-        stats[subject][level]["total"] += 1
-        if correct:
-            stats[subject][level]["correct"] += 1
+        
+        # FIX 3: Use stored input lengths for proper slicing
+        for i in range(len(prompts)):
+            input_len = input_lengths[i]
+            response = tokenizer.decode(
+                outputs[i][input_len:],  # Use actual input length, not padded
+                skip_special_tokens=True
+            )
+            
+            idx = batch_start + i
+            expected = batch["answer"][i]
+            level = batch["level"][i]
+            subject = batch["type"][i]
+            
+            extracted = extract_answer(response)
+            correct = is_correct(extracted, expected)
+            
+            results.append({
+                "idx": idx,
+                "question": batch["question"][i],
+                "expected": expected,
+                "extracted": extracted,
+                "response": response,
+                "correct": correct,
+                "level": level,
+                "type": subject,
+            })
+            
+            stats[subject][level]["total"] += 1
+            if correct:
+                stats[subject][level]["correct"] += 1
 
     # Save detailed results
-    import os
     os.makedirs(os.path.dirname(OUTPUT_PATH), exist_ok=True)
     
     with open(OUTPUT_PATH, "w") as f:
@@ -167,7 +193,6 @@ def main():
     levels = ["Level 1", "Level 2", "Level 3", "Level 4", "Level 5"]
     subjects = sorted(stats.keys())
 
-    # Create table data
     table_data = []
     for subject in subjects:
         row = {"Subject": subject}
@@ -185,7 +210,6 @@ def main():
         row["Overall"] = f"{subject_correct / subject_total * 100:.1f}%" if subject_total > 0 else "-"
         table_data.append(row)
 
-    # Add overall row
     overall_row = {"Subject": "OVERALL"}
     for level in levels:
         level_correct = sum(stats[s][level]["correct"] for s in subjects)
@@ -200,7 +224,6 @@ def main():
     overall_row["Overall"] = f"{total_correct / total * 100:.1f}%"
     table_data.append(overall_row)
 
-    # Print table
     df = pd.DataFrame(table_data)
     df = df.set_index("Subject")
     
@@ -216,7 +239,6 @@ def main():
     print(f"OVERALL ACCURACY: {total_correct}/{total} = {total_correct/total*100:.2f}%")
     print(f"{'=' * 80}")
 
-    # Save table as CSV
     csv_path = OUTPUT_PATH.replace(".jsonl", "_table.csv")
     df.to_csv(csv_path)
     print(f"\nSaved results table to {csv_path}")
