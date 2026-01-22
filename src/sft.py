@@ -33,19 +33,20 @@ def is_main_process() -> bool:
     """Check if current process is the main process (rank 0)."""
     if dist.is_initialized():
         return dist.get_rank() == 0
+        
     return int(os.environ.get("LOCAL_RANK", 0)) == 0
 
 
 def log_info(msg: str):
     """Log info only on main process."""
     if is_main_process():
-        log_info(msg)
+        logger.info(msg)
 
 
 def log_warning(msg: str):
     """Log warning only on main process."""
     if is_main_process():
-        log_warning(msg)
+        logger.warning(msg)
 
 
 SYSTEM_PROMPT = """
