@@ -2,7 +2,7 @@
 Supervised Fine-Tuning (SFT) script for TinyReasoner.
 
 This script trains a language model to output responses in a structured
-<think>...</think><answer>...</answer> format using the GSM8K dataset.
+<think>...</think><answer>...</answer> format using the MATH dataset.
 
 Usage:
     # Start fresh training
@@ -17,11 +17,13 @@ Usage:
 
 import argparse
 import os
+import shutil
 
 import torch
 import torch.distributed as dist
 import wandb
 import yaml
+from accelerate import PartialState
 from datasets import load_from_disk
 from loguru import logger
 from peft import LoraConfig, PeftModel, get_peft_model, prepare_model_for_kbit_training
@@ -241,6 +243,9 @@ def load_data(config: dict, tokenizer, formatting_func, max_length: int = 1024):
     """
     Load train and val datasets, filtering out examples exceeding max_length.
 
+    In distributed training, filtering is done only on main process, then all
+    processes load the processed data.
+
     Args:
         config: Data config dict with keys:
             - path: Path to training dataset
@@ -252,26 +257,46 @@ def load_data(config: dict, tokenizer, formatting_func, max_length: int = 1024):
     Returns:
         Tuple of (train_dataset, val_dataset).
     """
-    def is_within_limit(example):
-        text = formatting_func(example)
-        return len(tokenizer.encode(text)) <= max_length
+    state = PartialState()
+    processed_train_path = "data/.processed_train"
+    processed_val_path = "data/.processed_val"
 
-    # Load and filter train dataset
-    train_path = config["path"]
-    log_info(f"Loading train dataset from {train_path}")
-    train_dataset = load_from_disk(train_path)
-    train_original = len(train_dataset)
-    train_dataset = train_dataset.filter(is_within_limit)
-    log_info(f"Train filtered: {train_original} -> {len(train_dataset)} (<= {max_length} tokens)")
+    if state.is_main_process:
+        def is_within_limit(example):
+            text = formatting_func(example)
+            return len(tokenizer.encode(text)) <= max_length
 
-    # Load and filter val dataset (10% sample from test set)
-    eval_path = config["eval_path"]
-    log_info(f"Loading val dataset from {eval_path}")
-    val_dataset = load_from_disk(eval_path)
-    val_original = len(val_dataset)
-    val_dataset = val_dataset.filter(is_within_limit)
-    val_dataset = val_dataset.shuffle(seed=42).select(range(int(len(val_dataset) * 0.1)))
-    log_info(f"Val filtered: {val_original} -> {len(val_dataset)} (10% sample, <= {max_length} tokens)")
+        # Load and filter train dataset
+        train_path = config["path"]
+        log_info(f"Loading train dataset from {train_path}")
+        train_dataset = load_from_disk(train_path)
+        train_original = len(train_dataset)
+        train_dataset = train_dataset.filter(is_within_limit)
+        log_info(f"Train filtered: {train_original} -> {len(train_dataset)} (<= {max_length} tokens)")
+
+        # Load and filter val dataset (10% sample from test set)
+        eval_path = config["eval_path"]
+        log_info(f"Loading val dataset from {eval_path}")
+        val_dataset = load_from_disk(eval_path)
+        val_original = len(val_dataset)
+        val_dataset = val_dataset.filter(is_within_limit)
+        val_dataset = val_dataset.shuffle(seed=42).select(range(int(len(val_dataset) * 0.1)))
+        log_info(f"Val filtered: {val_original} -> {len(val_dataset)} (10% sample, <= {max_length} tokens)")
+
+        # Save processed datasets
+        if os.path.exists(processed_train_path):
+            shutil.rmtree(processed_train_path)
+        if os.path.exists(processed_val_path):
+            shutil.rmtree(processed_val_path)
+        train_dataset.save_to_disk(processed_train_path)
+        val_dataset.save_to_disk(processed_val_path)
+
+    # Wait for main process to finish processing
+    state.wait_for_everyone()
+
+    # All processes load the processed data
+    train_dataset = load_from_disk(processed_train_path)
+    val_dataset = load_from_disk(processed_val_path)
 
     return train_dataset, val_dataset
 
