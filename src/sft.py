@@ -199,7 +199,8 @@ def load_model_and_tokenizer(config: dict, adapter_path: str | None = None):
     tokenizer = AutoTokenizer.from_pretrained(model_path)
 
     if tokenizer.pad_token is None:
-        log_warning("Tokenizer pad_token is None; pad-based batching may break.")
+        tokenizer.pad_token = tokenizer.eos_token
+        log_info("Set pad_token = eos_token")
 
     # Prepare for k-bit training if quantized
     if quant_config:
@@ -262,42 +263,43 @@ def load_data(config: dict, tokenizer, formatting_func, max_length: int = 1024):
     processed_val_path = "data/.processed_val"
 
     if state.is_main_process:
-        def is_within_limit(example):
-            text = formatting_func(example)
-            return len(tokenizer.encode(text)) <= max_length
+        eos = tokenizer.eos_token_id
 
-        # Load and filter train dataset
+        def process_example(example):
+            """Format, tokenize, add EOS and labels in one pass."""
+            text = formatting_func(example)
+            out = tokenizer(
+                text,
+                truncation=True,
+                max_length=max_length - 1,  # leave room for EOS
+                add_special_tokens=False,
+            )
+            out["input_ids"] = out["input_ids"] + [eos]
+            out["attention_mask"] = out["attention_mask"] + [1]
+            out["labels"] = out["input_ids"].copy()
+            return out
+
+        # Load and process train dataset
         train_path = config["path"]
         log_info(f"Loading train dataset from {train_path}")
         train_dataset = load_from_disk(train_path)
         train_original = len(train_dataset)
-        train_dataset = train_dataset.filter(is_within_limit)
-        log_info(f"Train filtered: {train_original} -> {len(train_dataset)} (<= {max_length} tokens)")
+        log_info("Processing train dataset...")
+        train_dataset = train_dataset.map(process_example, remove_columns=train_dataset.column_names)
+        # Filter by max_length (after tokenization)
+        train_dataset = train_dataset.filter(lambda x: len(x["input_ids"]) <= max_length)
+        log_info(f"Train: {train_original} -> {len(train_dataset)} (<= {max_length} tokens)")
 
-        # Load and filter val dataset (10% sample from test set)
+        # Load and process val dataset (10% sample from test set)
         eval_path = config["eval_path"]
         log_info(f"Loading val dataset from {eval_path}")
         val_dataset = load_from_disk(eval_path)
         val_original = len(val_dataset)
-        val_dataset = val_dataset.filter(is_within_limit)
+        log_info("Processing val dataset...")
+        val_dataset = val_dataset.map(process_example, remove_columns=val_dataset.column_names)
+        val_dataset = val_dataset.filter(lambda x: len(x["input_ids"]) <= max_length)
         val_dataset = val_dataset.shuffle(seed=42).select(range(int(len(val_dataset) * 0.1)))
-        log_info(f"Val filtered: {val_original} -> {len(val_dataset)} (10% sample, <= {max_length} tokens)")
-
-        # Format to text
-        log_info("Formatting datasets...")
-        def to_text(example):
-            return {"text": formatting_func(example)}
-
-        train_dataset = train_dataset.map(to_text, remove_columns=train_dataset.column_names)
-        val_dataset = val_dataset.map(to_text, remove_columns=val_dataset.column_names)
-
-        # Tokenize
-        log_info("Tokenizing datasets...")
-        def tokenize(batch):
-            return tokenizer(batch["text"], truncation=True, max_length=max_length)
-
-        train_dataset = train_dataset.map(tokenize, batched=True, remove_columns=["text"])
-        val_dataset = val_dataset.map(tokenize, batched=True, remove_columns=["text"])
+        log_info(f"Val: {val_original} -> {len(val_dataset)} (10% sample, <= {max_length} tokens)")
 
         # Save processed datasets
         if os.path.exists(processed_train_path):
