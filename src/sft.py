@@ -19,6 +19,7 @@ import argparse
 import os
 
 import torch
+import torch.distributed as dist
 import wandb
 import yaml
 from datasets import load_from_disk
@@ -26,6 +27,25 @@ from loguru import logger
 from peft import LoraConfig, PeftModel, get_peft_model, prepare_model_for_kbit_training
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 from trl import SFTConfig, SFTTrainer
+
+
+def is_main_process() -> bool:
+    """Check if current process is the main process (rank 0)."""
+    if dist.is_initialized():
+        return dist.get_rank() == 0
+    return int(os.environ.get("LOCAL_RANK", 0)) == 0
+
+
+def log_info(msg: str):
+    """Log info only on main process."""
+    if is_main_process():
+        log_info(msg)
+
+
+def log_warning(msg: str):
+    """Log warning only on main process."""
+    if is_main_process():
+        log_warning(msg)
 
 
 SYSTEM_PROMPT = """
@@ -160,8 +180,8 @@ def load_model_and_tokenizer(config: dict, adapter_path: str | None = None):
     quant_config = setup_quantization(config["quant"])
     use_gradient_checkpointing = config["train"].get("use_gradient_checkpointing", False)
 
-    logger.info(f"Loading model from {model_path}")
-    logger.info(f"Gradient checkpointing: {use_gradient_checkpointing}")
+    log_info(f"Loading model from {model_path}")
+    log_info(f"Gradient checkpointing: {use_gradient_checkpointing}")
 
     model = AutoModelForCausalLM.from_pretrained(
         model_path,
@@ -176,7 +196,7 @@ def load_model_and_tokenizer(config: dict, adapter_path: str | None = None):
     tokenizer = AutoTokenizer.from_pretrained(model_path)
 
     if tokenizer.pad_token is None:
-        logger.warning("Tokenizer pad_token is None; pad-based batching may break.")
+        log_warning("Tokenizer pad_token is None; pad-based batching may break.")
 
     # Prepare for k-bit training if quantized
     if quant_config:
@@ -194,7 +214,7 @@ def load_model_and_tokenizer(config: dict, adapter_path: str | None = None):
 
     # Load existing adapter or create a new one
     if adapter_path:
-        logger.info(f"Loading LoRA weights from {adapter_path}")
+        log_info(f"Loading LoRA weights from {adapter_path}")
         model = PeftModel.from_pretrained(
             model,
             adapter_path,
@@ -206,7 +226,7 @@ def load_model_and_tokenizer(config: dict, adapter_path: str | None = None):
                 gradient_checkpointing_kwargs={"use_reentrant": False}
             )
     else:
-        logger.info("Creating new LoRA adapter")
+        log_info("Creating new LoRA adapter")
         lora_config = get_lora_config(config=config["lora"])
         model = get_peft_model(model, lora_config)
 
@@ -237,27 +257,27 @@ def load_data(config: dict, tokenizer, formatting_func, max_length: int = 1024):
 
     # Load and filter train dataset
     train_path = config["path"]
-    logger.info(f"Loading train dataset from {train_path}")
+    log_info(f"Loading train dataset from {train_path}")
     train_dataset = load_from_disk(train_path)
     train_original = len(train_dataset)
     train_dataset = train_dataset.filter(is_within_limit)
-    logger.info(f"Train filtered: {train_original} -> {len(train_dataset)} (<= {max_length} tokens)")
+    log_info(f"Train filtered: {train_original} -> {len(train_dataset)} (<= {max_length} tokens)")
 
     # Load and filter val dataset (10% sample from test set)
     eval_path = config["eval_path"]
-    logger.info(f"Loading val dataset from {eval_path}")
+    log_info(f"Loading val dataset from {eval_path}")
     val_dataset = load_from_disk(eval_path)
     val_original = len(val_dataset)
     val_dataset = val_dataset.filter(is_within_limit)
     val_dataset = val_dataset.shuffle(seed=42).select(range(int(len(val_dataset) * 0.1)))
-    logger.info(f"Val filtered: {val_original} -> {len(val_dataset)} (10% sample, <= {max_length} tokens)")
+    log_info(f"Val filtered: {val_original} -> {len(val_dataset)} (10% sample, <= {max_length} tokens)")
 
     return train_dataset, val_dataset
 
 
 def setup_wandb(config: dict, full_config: dict):
     """
-    Initialize Weights & Biases for experiment tracking.
+    Initialize Weights & Biases for experiment tracking (main process only).
 
     Args:
         config: Wandb config dict with keys:
@@ -267,9 +287,14 @@ def setup_wandb(config: dict, full_config: dict):
         full_config: Full training config to log as wandb config.
 
     Returns:
-        Wandb run object if enabled, None otherwise.
+        Wandb run object if enabled and main process, None otherwise.
     """
     if not config.get("enabled", False):
+        os.environ["WANDB_DISABLED"] = "true"
+        return None
+
+    # Only initialize wandb on main process
+    if not is_main_process():
         os.environ["WANDB_DISABLED"] = "true"
         return None
 
@@ -279,7 +304,7 @@ def setup_wandb(config: dict, full_config: dict):
         config=full_config,
         resume="allow",
     )
-    logger.info(f"Wandb initialized: {run.url}")
+    log_info(f"Wandb initialized: {run.url}")
     return run
 
 
@@ -354,8 +379,8 @@ def main(config_path: str, init_from: str | None = None, resume: str | None = No
         run_name=wandb_config.get("run_name"),
     )
 
-    # Watch model for gradient logging
-    if wandb_config.get("enabled", False) and wandb_config.get("watch_model", False):
+    # Watch model for gradient logging (main process only)
+    if wandb_config.get("enabled", False) and wandb_config.get("watch_model", False) and is_main_process():
         wandb.watch(model, log="all", log_freq=log_config["log_steps"])
 
     # Create trainer
@@ -368,16 +393,16 @@ def main(config_path: str, init_from: str | None = None, resume: str | None = No
     )
 
     # Train (resume from checkpoint if specified)
-    logger.info("Starting training...")
+    log_info("Starting training...")
     trainer.train(resume_from_checkpoint=resume)
 
-    # Cleanup wandb
-    if wandb_config.get("enabled", False):
+    # Cleanup wandb (main process only)
+    if wandb_config.get("enabled", False) and is_main_process():
         if wandb_config.get("log_model", False):
             wandb.save(f"{ckpt_config['output_dir']}/*")
         wandb.finish()
 
-    logger.info("Training complete!")
+    log_info("Training complete!")
 
 
 if __name__ == "__main__":
