@@ -1,0 +1,49 @@
+model:
+  path: "Qwen/Qwen2.5-3B-Instruct"
+
+# SFT adapter to merge into base model
+sft_adapter_path: "./checkpointing/final"
+
+# New LoRA config for GRPO training
+lora:
+  r: 16
+  alpha: 32
+  dropout: 0.05
+  target_modules: ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+  bias: "none"
+
+data:
+  path: "data/train"
+  eval_path: "data/val"
+
+seed: 42
+
+grpo:
+  output_dir: "./grpo_checkpoints"
+  # Generation
+  num_generations: 4
+  max_prompt_length: 512
+  max_completion_length: 1024
+  temperature: 0.7
+  # Training
+  learning_rate: 0.00005
+  per_device_train_batch_size: 2
+  gradient_accumulation_steps: 8
+  max_steps: 1000
+  max_grad_norm: 1.0
+  bf16: True
+  use_gradient_checkpointing: True
+  # Rewards
+  format_reward: 0.2
+  correctness_reward: 1.0
+  # Logging & saving
+  logging_steps: 10
+  save_steps: 100
+  # Evaluation
+  eval_steps: 100
+  eval_max_examples: 256
+
+wandb:
+  enabled: True
+  project: "tinyreasoner-grpo"
+  run_name: null
