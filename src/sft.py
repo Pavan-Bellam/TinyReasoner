@@ -29,11 +29,21 @@ from trl import SFTConfig, SFTTrainer
 
 
 SYSTEM_PROMPT = """
-Return your response in this exact format:
+You must reply in exactly this format and output nothing else:
+
 <think>
-...
+Step-by-step reasoning here.
 </think>
-<answer>...</answer>
+<answer>
+Final answer only.
+</answer>
+
+Rules:
+- Do not include any text before <think> or after </answer>.
+- Put all reasoning in <think>.
+- Put only the final answer in <answer> (no explanation).
+- If the answer is numeric, output only the number (no commas, no units).
+
 """
 
 
@@ -206,26 +216,43 @@ def load_model_and_tokenizer(config: dict, adapter_path: str | None = None):
     return model, tokenizer
 
 
-def load_data(config: dict):
+def load_data(config: dict, tokenizer, formatting_func, max_length: int = 1024):
     """
-    Load and split the training dataset.
+    Load train and val datasets, filtering out examples exceeding max_length.
 
     Args:
-        config: Data config dict with 'path' key pointing to the dataset location.
+        config: Data config dict with keys:
+            - path: Path to training dataset
+            - eval_path: Path to test dataset (10% sampled for validation)
+        tokenizer: Tokenizer for computing sequence lengths.
+        formatting_func: Function to format examples into training text.
+        max_length: Maximum token length (examples exceeding this are filtered out).
 
     Returns:
-        Tuple of (train_dataset, val_dataset) with a 90/10 split.
+        Tuple of (train_dataset, val_dataset).
     """
-    data_path = config["path"]
-    logger.info(f"Loading dataset from {data_path}")
-    dataset = load_from_disk(data_path)
-    splits = dataset.train_test_split(
-        test_size=0.1,
-        seed=42,
-        shuffle=True,
-    )
-    logger.info(f"Train: {len(splits['train'])}, Val: {len(splits['test'])}")
-    return splits["train"], splits["test"]
+    def is_within_limit(example):
+        text = formatting_func(example)
+        return len(tokenizer.encode(text)) <= max_length
+
+    # Load and filter train dataset
+    train_path = config["path"]
+    logger.info(f"Loading train dataset from {train_path}")
+    train_dataset = load_from_disk(train_path)
+    train_original = len(train_dataset)
+    train_dataset = train_dataset.filter(is_within_limit)
+    logger.info(f"Train filtered: {train_original} -> {len(train_dataset)} (<= {max_length} tokens)")
+
+    # Load and filter val dataset (10% sample from test set)
+    eval_path = config["eval_path"]
+    logger.info(f"Loading val dataset from {eval_path}")
+    val_dataset = load_from_disk(eval_path)
+    val_original = len(val_dataset)
+    val_dataset = val_dataset.filter(is_within_limit)
+    val_dataset = val_dataset.shuffle(seed=42).select(range(int(len(val_dataset) * 0.1)))
+    logger.info(f"Val filtered: {val_original} -> {len(val_dataset)} (10% sample, <= {max_length} tokens)")
+
+    return train_dataset, val_dataset
 
 
 def setup_wandb(config: dict, full_config: dict):
@@ -280,7 +307,14 @@ def main(config_path: str, init_from: str | None = None, resume: str | None = No
     model, tokenizer = load_model_and_tokenizer(config, adapter_path)
 
     # Load data
-    train_data, val_data = load_data(config=config["data"])
+    formatting_func = get_formatting_func(tokenizer)
+    max_length = config["train"].get("max_length", 1024)
+    train_data, val_data = load_data(
+        config=config["data"],
+        tokenizer=tokenizer,
+        formatting_func=formatting_func,
+        max_length=max_length,
+    )
 
     # Extract config sections
     train_config = config["train"]
@@ -314,7 +348,7 @@ def main(config_path: str, init_from: str | None = None, resume: str | None = No
         seed=config["seed"],
         dataloader_num_workers=train_config.get("dataloader_num_workers", 0),
         remove_unused_columns=False,
-        max_length=train_config.get("max_length", 512),
+        max_length=train_config.get("max_length", 1024),
         save_safetensors=True,
         report_to="wandb" if wandb_config.get("enabled", False) else "none",
         run_name=wandb_config.get("run_name"),
@@ -330,7 +364,7 @@ def main(config_path: str, init_from: str | None = None, resume: str | None = No
         args=training_args,
         train_dataset=train_data,
         eval_dataset=val_data,
-        formatting_func=get_formatting_func(tokenizer=tokenizer),
+        formatting_func=formatting_func,
     )
 
     # Train (resume from checkpoint if specified)
