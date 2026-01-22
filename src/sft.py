@@ -137,7 +137,11 @@ def main(config_path: str, resume: str | None = None):
     # Load pre-tokenized data
     log_info("Loading pre-tokenized data...")
     train_data = load_from_disk(config["data"]["path"])
+    train_data = train_data.remove_columns([c for c in train_data.column_names if c not in ["input_ids", "attention_mask", "labels"]])
+
     val_data = load_from_disk(config["data"]["eval_path"])
+    val_data = val_data.remove_columns([c for c in val_data.column_names if c not in ["input_ids", "attention_mask", "labels"]])
+
     log_info(f"Train: {len(train_data)}, Val: {len(val_data)}")
 
     train_cfg = config["train"]

@@ -100,36 +100,61 @@ def format_example(example: dict) -> dict | None:
 
 
 def process_example(example: dict, tokenizer) -> dict:
-    """Format, tokenize, add EOS and labels."""
     formatted = format_example(example)
     if formatted is None:
-        print('formatted is none for exmaple: ', example)
-        return {"input_ids": None, "attention_mask": None, "labels": None}
+        return {
+            "prompt": None,
+            "answer": None,
+            "input_ids": None,
+            "attention_mask": None,
+            "labels": None,
+        }
 
-    messages = [
+    # ---- GRPO fields ----
+    grpo_messages = [
+        {"role": "system", "content": formatted["system"]},
+        {"role": "user", "content": formatted["user"]},
+    ]
+    prompt = tokenizer.apply_chat_template(
+        grpo_messages,
+        tokenize=False,
+        add_generation_prompt=True,
+    )
+
+    # ground truth answer (raw LaTeX extracted from boxed)
+    answer = extract_answer(example["solution"])
+
+    # ---- SFT fields (your current behavior) ----
+    sft_messages = [
         {"role": "system", "content": formatted["system"]},
         {"role": "user", "content": formatted["user"]},
         {"role": "assistant", "content": formatted["assistant"]},
     ]
-    full = tokenizer.apply_chat_template(messages, tokenize=False)
-    prefix = tokenizer.apply_chat_template(messages[:-1], tokenize=False)
+    full = tokenizer.apply_chat_template(sft_messages, tokenize=False)
+    prefix = tokenizer.apply_chat_template(sft_messages[:-1], tokenize=False)
 
-    out = tokenizer(
-        full,
-        add_special_tokens=False,
-    )
-    prefix_tokens = tokenizer(
-        prefix,
-        add_special_tokens=False
-    )
+    out = tokenizer(full, add_special_tokens=False)
+    prefix_tokens = tokenizer(prefix, add_special_tokens=False)
+
     assistant_start = len(prefix_tokens["input_ids"])
     eos = tokenizer.eos_token_id
+
     out["input_ids"] = out["input_ids"] + [eos]
     out["attention_mask"] = out["attention_mask"] + [1]
     out["labels"] = out["input_ids"].copy()
-    out['labels'][:assistant_start] = [-100]*assistant_start
+    out["labels"][:assistant_start] = [-100] * assistant_start
 
-    return out
+    return {
+        # GRPO
+        "prompt": prompt,
+        "answer": answer,
+
+        # SFT
+        "input_ids": out["input_ids"],
+        "attention_mask": out["attention_mask"],
+        "labels": out["labels"],
+    }
+
 
 
 def load_math_dataset():
@@ -157,8 +182,9 @@ def process_split(dataset, tokenizer, max_length: int, desc: str):
     )
 
     # Filter out failed examples and those exceeding max_length
-    processed = processed.filter(lambda x: x["input_ids"] is not None)
+    processed = processed.filter(lambda x: x["input_ids"] is not None and x["prompt"] is not None and x["answer"] is not None)
     processed = processed.filter(lambda x: len(x["input_ids"]) <= max_length)
+
 
     print(f"{desc}: {original_size} -> {len(processed)}")
     return processed
