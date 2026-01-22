@@ -265,28 +265,12 @@ def generate_response(
 def evaluate(
     model,
     tokenizer,
-    test_data,
     num_samples: int | None = None,
     max_new_tokens: int = 512,
     save_path: str | None = None,
 ):
     """Run evaluation on test set."""
 
-    if num_samples:
-        test_data = test_data.select(range(min(num_samples, len(test_data))))
-
-    results = []
-    format_stats = {
-        "has_think_tag": 0,
-        "has_answer_tag": 0,
-        "starts_correctly": 0,
-        "ends_correctly": 0,
-        "correct_order": 0,
-        "fully_compliant": 0,
-    }
-    correct_answers = 0
-
-    # We need original problems and solutions - reload raw data
     from datasets import load_dataset, concatenate_datasets
 
     SUBSETS = [
@@ -299,6 +283,17 @@ def evaluate(
     if num_samples:
         raw_test = raw_test.select(range(min(num_samples, len(raw_test))))
 
+    results = []
+    format_stats = {
+        "has_think_tag": 0,
+        "has_answer_tag": 0,
+        "starts_correctly": 0,
+        "ends_correctly": 0,
+        "correct_order": 0,
+        "fully_compliant": 0,
+    }
+    correct_answers = 0
+
     logger.info(f"Evaluating on {len(raw_test)} samples...")
 
     for i, example in enumerate(tqdm(raw_test, desc="Evaluating")):
@@ -306,16 +301,13 @@ def evaluate(
         solution = example["solution"]
         ground_truth = extract_ground_truth(solution)
 
-        # Generate response
         response = generate_response(model, tokenizer, problem, max_new_tokens)
 
-        # Check format
         format_check = check_format_compliance(response)
         for key in format_stats:
             if format_check.get(key, False):
                 format_stats[key] += 1
 
-        # Check answer
         is_correct = check_answer_correctness(format_check["extracted_answer"], ground_truth)
         if is_correct:
             correct_answers += 1
@@ -329,7 +321,6 @@ def evaluate(
             "answer_correct": is_correct,
         })
 
-        # Log progress every 50 samples
         if (i + 1) % 50 == 0:
             logger.info(
                 f"Progress: {i+1}/{len(raw_test)} | "
@@ -337,7 +328,6 @@ def evaluate(
                 f"Accuracy: {correct_answers/(i+1)*100:.1f}%"
             )
 
-    # Compute final metrics
     total = len(results)
     metrics = {
         "total_samples": total,
@@ -346,7 +336,6 @@ def evaluate(
             "correct": correct_answers,
             "percent": correct_answers / total * 100,
         },
-        # Accuracy only on format-compliant samples
         "accuracy_given_format": {
             "correct": sum(1 for r in results if r["format_compliant"] and r["answer_correct"]),
             "total_compliant": format_stats["fully_compliant"],
@@ -357,7 +346,6 @@ def evaluate(
         },
     }
 
-    # Print summary
     logger.info("\n" + "=" * 60)
     logger.info("EVALUATION RESULTS")
     logger.info("=" * 60)
@@ -373,7 +361,6 @@ def evaluate(
     logger.info(f"  Overall:            {correct_answers:4d} ({correct_answers/total*100:.1f}%)")
     logger.info(f"  Given format OK:    {metrics['accuracy_given_format']['correct']:4d} / {format_stats['fully_compliant']} ({metrics['accuracy_given_format']['percent']:.1f}%)")
 
-    # Save results
     if save_path:
         output = {"metrics": metrics, "results": results}
         Path(save_path).parent.mkdir(parents=True, exist_ok=True)
@@ -393,7 +380,6 @@ def main(config_path: str, checkpoint_path: str, num_samples: int | None, output
     metrics, results = evaluate(
         model,
         tokenizer,
-        test_data=None,  # We load raw data inside
         num_samples=num_samples,
         save_path=output_path,
     )
