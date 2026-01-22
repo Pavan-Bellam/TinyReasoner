@@ -116,8 +116,8 @@ def main():
         print(f"A: {ex['answer']}")
 
     # Save
-    train_processed.save_to_disk("data/math_train")
-    test_processed.save_to_disk("data/math_test")
+    train_processed.save_to_disk("data/train")
+    test_processed.save_to_disk("data/test")
     
     print(f"\nSaved to data/math_{{train,test}}")
 
