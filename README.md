@@ -21,7 +21,15 @@ cd tinyreasoner
 uv sync
 ```
 
-## Baseline Evaluation
+## Quick Start
+
+### 1. Process Data
+
+```bash
+python src/process_data.py
+```
+
+### 2. Baseline Evaluation
 
 Evaluate the base model on MATH dataset:
 
@@ -36,11 +44,12 @@ Results are saved to `results/baseline_results.jsonl` with a summary table showi
 ```
 tinyreasoner/
 ├── src/
+│   ├── process_data.py      # MATH dataset processing
 │   └── eval/
-│       └── baseline.py   # Base model evaluation
-├── data/                 # Datasets (gitignored)
-├── results/              # Evaluation outputs (gitignored)
-├── dev_docs.md           # Developer documentation
+│       └── baseline.py      # Base model evaluation
+├── data/                    # Datasets (gitignored)
+├── results/                 # Evaluation outputs (gitignored)
+├── dev_docs.md              # Developer documentation
 ├── pyproject.toml
 └── README.md
 ```

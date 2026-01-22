@@ -16,6 +16,38 @@
 
 ---
 
+## Data Processing (`src/process_data.py`)
+
+Processes the MATH dataset into train/test splits for SFT training.
+
+**Source:** `EleutherAI/hendrycks_math` (7 subsets: algebra, counting_and_probability, geometry, intermediate_algebra, number_theory, prealgebra, precalculus)
+
+**Processing steps:**
+1. Load all subsets and concatenate
+2. Keep full solution as chain-of-thought (including `\boxed{}`)
+3. Extract final answer (content inside `\boxed{}`)
+4. Filter out examples without valid boxed answers
+
+**Output format:**
+```python
+{
+    "question": "...",
+    "cot": "...",
+    "answer": "...",
+    "level": "Level 1-5",
+    "type": "algebra/geometry/..."
+}
+```
+
+**Storage:** `data/math_train/` and `data/math_test/`
+
+**Usage:**
+```bash
+python src/process_data.py
+```
+
+---
+
 ## Baseline Evaluation (`src/eval/baseline.py`)
 
 Evaluates the base model on the MATH dataset before any fine-tuning.
@@ -62,10 +94,12 @@ python src/eval/baseline.py
 ```
 tinyreasoner/
 ├── src/
+│   ├── process_data.py      # MATH dataset processing
+│   ├── check_prompt_size.py # Token length analysis
 │   └── eval/
-│       └── baseline.py   # Base model evaluation
-├── data/                 # Datasets (gitignored)
-├── results/              # Evaluation outputs (gitignored)
+│       └── baseline.py      # Base model evaluation
+├── data/                    # Datasets (gitignored)
+├── results/                 # Evaluation outputs (gitignored)
 ├── dev_docs.md
 ├── pyproject.toml
 └── README.md
@@ -94,6 +128,12 @@ source .venv/bin/activate  # Unix
 
 # Install dependencies
 uv sync
+
+# Process MATH dataset
+python src/process_data.py
+
+# Check prompt token sizes
+python src/check_prompt_size.py
 
 # Run baseline evaluation
 python src/eval/baseline.py
