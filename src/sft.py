@@ -241,21 +241,21 @@ def load_model_and_tokenizer(config: dict, adapter_path: str | None = None):
 
 def load_data(config: dict, tokenizer, formatting_func, max_length: int = 1024):
     """
-    Load train and val datasets, filtering out examples exceeding max_length.
+    Load, filter, format, and tokenize datasets.
 
-    In distributed training, filtering is done only on main process, then all
-    processes load the processed data.
+    In distributed training, all processing is done only on main process,
+    then all processes load the pre-tokenized data.
 
     Args:
         config: Data config dict with keys:
             - path: Path to training dataset
             - eval_path: Path to test dataset (10% sampled for validation)
-        tokenizer: Tokenizer for computing sequence lengths.
+        tokenizer: Tokenizer for tokenizing examples.
         formatting_func: Function to format examples into training text.
         max_length: Maximum token length (examples exceeding this are filtered out).
 
     Returns:
-        Tuple of (train_dataset, val_dataset).
+        Tuple of (train_dataset, val_dataset) - pre-tokenized.
     """
     state = PartialState()
     processed_train_path = "data/.processed_train"
@@ -283,6 +283,22 @@ def load_data(config: dict, tokenizer, formatting_func, max_length: int = 1024):
         val_dataset = val_dataset.shuffle(seed=42).select(range(int(len(val_dataset) * 0.1)))
         log_info(f"Val filtered: {val_original} -> {len(val_dataset)} (10% sample, <= {max_length} tokens)")
 
+        # Format to text
+        log_info("Formatting datasets...")
+        def to_text(example):
+            return {"text": formatting_func(example)}
+
+        train_dataset = train_dataset.map(to_text, remove_columns=train_dataset.column_names)
+        val_dataset = val_dataset.map(to_text, remove_columns=val_dataset.column_names)
+
+        # Tokenize
+        log_info("Tokenizing datasets...")
+        def tokenize(batch):
+            return tokenizer(batch["text"], truncation=True, max_length=max_length)
+
+        train_dataset = train_dataset.map(tokenize, batched=True, remove_columns=["text"])
+        val_dataset = val_dataset.map(tokenize, batched=True, remove_columns=["text"])
+
         # Save processed datasets
         if os.path.exists(processed_train_path):
             shutil.rmtree(processed_train_path)
@@ -290,6 +306,7 @@ def load_data(config: dict, tokenizer, formatting_func, max_length: int = 1024):
             shutil.rmtree(processed_val_path)
         train_dataset.save_to_disk(processed_train_path)
         val_dataset.save_to_disk(processed_val_path)
+        log_info("Processed datasets saved")
 
     # Wait for main process to finish processing
     state.wait_for_everyone()
@@ -409,13 +426,12 @@ def main(config_path: str, init_from: str | None = None, resume: str | None = No
     if wandb_config.get("enabled", False) and wandb_config.get("watch_model", False) and is_main_process():
         wandb.watch(model, log="all", log_freq=log_config["log_steps"])
 
-    # Create trainer
+    # Create trainer (data is pre-tokenized, no formatting_func needed)
     trainer = SFTTrainer(
         model=model,
         args=training_args,
         train_dataset=train_data,
         eval_dataset=val_data,
-        formatting_func=formatting_func,
     )
 
     # Train (resume from checkpoint if specified)
