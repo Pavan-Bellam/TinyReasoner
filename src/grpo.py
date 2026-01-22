@@ -20,33 +20,74 @@ from sympy.parsing.latex import parse_latex
 from sympy import N
 
 
-def canonicalize_latex_answer(ans: str) -> float | None:
+_INTERVAL_RE = re.compile(r'^\s*[\[\(].*[,;].*[\]\)]\s*$')
+
+
+def _canonicalize_interval(s: str) -> str:
+    """Normalize interval string: remove whitespace, normalize separators."""
+    s = re.sub(r"\s+", "", s)
+    s = s.replace(";", ",")
+    return s
+
+
+def _canonicalize_set(s: str) -> str:
+    """Normalize set string: convert LaTeX braces to {}, remove whitespace."""
+    s = s.strip()
+    s = s.replace(r"\left\{", "{").replace(r"\right\}", "}")
+    s = s.replace(r"\{", "{").replace(r"\}", "}")
+    s = re.sub(r"\s+", "", s)
+    return s
+
+
+def canonicalize_answer(ans: str) -> tuple[str | None, any]:
     """
-    Convert LaTeX math answer to a float.
-    Returns None if non-scalar or unparseable.
+    Returns a tagged canonical form:
+      ("num", float) for scalars
+      ("interval", str) for intervals
+      ("set", str) for sets
+      (None, None) for unhandled
     """
     if ans is None:
-        return None
+        return (None, None)
 
     s = ans.strip()
 
-    # Reject intervals / sets explicitly
-    if s.startswith("[") or s.startswith("(") or r"\{" in s:
-        return None
+    # Interval like [-2,7], (0,1], etc.
+    if _INTERVAL_RE.match(s) and (s[0] in "[(") and (s[-1] in "])"):
+        return ("interval", _canonicalize_interval(s))
 
-    # Percentages: 8\% -> 0.08
+    # Set: LaTeX braces
+    if (r"\{" in s) or (s.startswith("{") and s.endswith("}")):
+        return ("set", _canonicalize_set(s))
+
+    # Percentage
     if r"\%" in s:
-        s = s.replace(r"\%", "")
+        s2 = s.replace(r"\%", "")
         try:
-            return float(N(parse_latex(s))) / 100.0
+            return ("num", float(N(parse_latex(s2))) / 100.0)
         except Exception:
-            return None
+            return (None, None)
 
-    # Normal numeric / fraction / dfrac
+    # Numeric / fraction / dfrac
     try:
-        return float(N(parse_latex(s)))
+        return ("num", float(N(parse_latex(s))))
     except Exception:
-        return None
+        return (None, None)
+
+
+def answers_match(pred: str, gt: str) -> bool:
+    """Check if predicted answer matches ground truth, handling different types."""
+    p_tag, p_val = canonicalize_answer(pred)
+    g_tag, g_val = canonicalize_answer(gt)
+
+    if p_tag is None or g_tag is None:
+        return False
+    if p_tag != g_tag:
+        return False
+    if p_tag in ("interval", "set"):
+        return p_val == g_val
+    # numeric
+    return math.isclose(p_val, g_val, rel_tol=1e-6)
 
 
 
@@ -100,16 +141,7 @@ def make_reward_funcs(format_weight: float = 0.2, correctness_weight: float = 1.
 
             format_valid_count += 1
 
-            pred_val = canonicalize_latex_answer(extracted)
-            gt_val = canonicalize_latex_answer(gt)
-
-            # Reject non-numeric answers cleanly
-            if pred_val is None or gt_val is None:
-                rewards.append(0.0)
-                continue
-
-            # Approximate numeric match
-            if math.isclose(pred_val, gt_val, rel_tol=1e-6):
+            if answers_match(extracted, gt):
                 rewards.append(correctness_weight)
                 correct_count += 1
             else:
@@ -139,6 +171,8 @@ def load_model_and_tokenizer(config: dict, resume_checkpoint: str | None = None)
     use_gradient_checkpointing = grpo_config.get("use_gradient_checkpointing", False)
 
     tokenizer = AutoTokenizer.from_pretrained(model_path)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "left"
 
     logger.info(f"Loading base model from {model_path}")
@@ -151,12 +185,32 @@ def load_model_and_tokenizer(config: dict, resume_checkpoint: str | None = None)
         attn_implementation="sdpa",
     )
 
+    # Sync tokenizer special tokens with model config
+    model.config.pad_token_id = tokenizer.pad_token_id
+    model.generation_config.pad_token_id = tokenizer.pad_token_id
+    if tokenizer.eos_token_id is not None:
+        model.config.eos_token_id = tokenizer.eos_token_id
+        model.generation_config.eos_token_id = tokenizer.eos_token_id
+    if tokenizer.bos_token_id is not None:
+        model.config.bos_token_id = tokenizer.bos_token_id
+        model.generation_config.bos_token_id = tokenizer.bos_token_id
+
     # Always merge SFT adapter first (GRPO adapter was trained on merged model)
     logger.info(f"Loading SFT adapter from {sft_adapter_path}")
     model = PeftModel.from_pretrained(model, sft_adapter_path)
 
     logger.info("Merging SFT adapter into base model")
     model = model.merge_and_unload()
+
+    # Remove leftover PEFT metadata to prevent multi-adapter warning
+    for attr in ("peft_config", "active_adapter"):
+        if hasattr(model, attr):
+            try:
+                delattr(model, attr)
+            except Exception:
+                pass
+
+    logger.info(f"After merge: is PeftModel={isinstance(model, PeftModel)}, has peft_config={hasattr(model, 'peft_config')}")
 
     if resume_checkpoint:
         # Resuming from GRPO checkpoint - load existing GRPO adapter
@@ -236,7 +290,6 @@ def evaluate_pass_metrics(
     for ex in subset:
         prompt = ex["prompt"]
         gt = ex["answer"]
-        gt_norm = canonicalize_latex_answer(gt)
 
         inputs = tokenizer(
             prompt,
@@ -258,9 +311,7 @@ def evaluate_pass_metrics(
         valid1, ans1 = parse_response(text1)
         if valid1:
             pass1_format += 1
-        if valid1 and gt_norm is not None:
-            ans1_norm = canonicalize_latex_answer(ans1)
-            if ans1_norm is not None and math.isclose(ans1_norm, gt_norm, rel_tol=1e-6):
+            if answers_match(ans1, gt):
                 pass1_correct += 1
 
         # PASS@K (sampled)
@@ -280,11 +331,9 @@ def evaluate_pass_metrics(
             validk, ansk = parse_response(textk)
             if validk:
                 any_valid = True
-                if gt_norm is not None:
-                    ansk_norm = canonicalize_latex_answer(ansk)
-                    if ansk_norm is not None and math.isclose(ansk_norm, gt_norm, rel_tol=1e-6):
-                        any_correct = True
-                        break
+                if answers_match(ansk, gt):
+                    any_correct = True
+                    break
 
         if any_valid:
             passk_format += 1
