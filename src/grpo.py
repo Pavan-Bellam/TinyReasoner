@@ -415,11 +415,16 @@ def main(config_path: str, resume: str | None = None):
 
     logger.info(f"Loading dataset from {config['data']['path']}")
     train_data = load_from_disk(config["data"]["path"])
-    train_data = train_data.remove_columns([c for c in train_data.column_names if c not in ["prompt", "answer"]])
-    logger.info(f"Dataset size: {len(train_data)}")
+    keep_columns = ["prompt", "answer", "level", "subject"]
+    train_data = train_data.remove_columns([c for c in train_data.column_names if c not in keep_columns])
+    logger.info(f"Full dataset size: {len(train_data)}")
+
+    # Filter to only Level 3-5 (harder problems) for GRPO
+    train_data = train_data.filter(lambda x: x["level"] in ["Level 3", "Level 4", "Level 5"])
+    logger.info(f"Filtered to Level 3-5: {len(train_data)}")
 
     eval_data = load_from_disk(config['data']['eval_path'])
-    eval_data = eval_data.remove_columns([c for c in eval_data.column_names if c not in ["prompt", "answer"]])
+    eval_data = eval_data.remove_columns([c for c in eval_data.column_names if c not in keep_columns])
 
     format_reward_fn, correctness_reward_fn = make_reward_funcs(
         format_weight=grpo_config.get("format_reward", 0.2),

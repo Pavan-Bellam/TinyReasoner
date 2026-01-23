@@ -105,6 +105,8 @@ def process_example(example: dict, tokenizer) -> dict:
         return {
             "prompt": None,
             "answer": None,
+            "level": None,
+            "subject": None,
             "input_ids": None,
             "attention_mask": None,
             "labels": None,
@@ -123,6 +125,10 @@ def process_example(example: dict, tokenizer) -> dict:
 
     # ground truth answer (raw LaTeX extracted from boxed)
     answer = extract_answer(example["solution"])
+
+    # metadata for curriculum/filtering in GRPO
+    level = example.get("level", None)
+    subject = example.get("type", None)  # MATH dataset uses "type" for subject
 
     # ---- SFT fields (your current behavior) ----
     sft_messages = [
@@ -148,6 +154,8 @@ def process_example(example: dict, tokenizer) -> dict:
         # GRPO
         "prompt": prompt,
         "answer": answer,
+        "level": level,
+        "subject": subject,
 
         # SFT
         "input_ids": out["input_ids"],
@@ -182,7 +190,11 @@ def process_split(dataset, tokenizer, max_length: int, desc: str):
     )
 
     # Filter out failed examples and those exceeding max_length
-    processed = processed.filter(lambda x: x["input_ids"] is not None and x["prompt"] is not None and x["answer"] is not None)
+    processed = processed.filter(
+        lambda x: x["input_ids"] is not None
+        and x["prompt"] is not None
+        and x["answer"] is not None
+    )
     processed = processed.filter(lambda x: len(x["input_ids"]) <= max_length)
 
 
