@@ -121,9 +121,8 @@ def main():
         batch_end = min(batch_start + BATCH_SIZE, len(dataset))
         batch = dataset[batch_start:batch_end]
         
-        # FIX 1: batch["question"] returns a list, this is correct
         prompts = []
-        for question in batch["question"]:
+        for question in batch["problem"]:
             prompt = build_prompt(question)
             messages = [{"role": "user", "content": prompt}]
             text = tokenizer.apply_chat_template(
@@ -139,7 +138,6 @@ def main():
             max_length=2048
         ).to(model.device)
         
-        # FIX 2: Store input lengths BEFORE generation (padding makes them equal)
         input_lengths = inputs["attention_mask"].sum(dim=1).tolist()
         
         with torch.no_grad():
@@ -150,11 +148,9 @@ def main():
                 pad_token_id=tokenizer.eos_token_id,
             )
         
-        # FIX 3: Use stored input lengths for proper slicing
         for i in range(len(prompts)):
-            input_len = input_lengths[i]
             response = tokenizer.decode(
-                outputs[i][input_len:],  # Use actual input length, not padded
+                outputs[i][input_lengths[i]:],
                 skip_special_tokens=True
             )
             
@@ -168,7 +164,7 @@ def main():
             
             results.append({
                 "idx": idx,
-                "question": batch["question"][i],
+                "problem": batch["problem"][i],
                 "expected": expected,
                 "extracted": extracted,
                 "response": response,
