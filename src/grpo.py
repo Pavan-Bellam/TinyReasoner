@@ -1,6 +1,5 @@
 import os
 import re
-import math
 import yaml
 import argparse
 from dataclasses import dataclass
@@ -16,78 +15,38 @@ from transformers import (
 )
 from peft import PeftModel, LoraConfig, get_peft_model
 from trl import GRPOConfig, GRPOTrainer
-from sympy.parsing.latex import parse_latex
-from sympy import N
+from sympy import simplify, Expr
+
+from process_data import parse_answer
 
 
-_INTERVAL_RE = re.compile(r'^\s*[\[\(].*[,;].*[\]\)]\s*$')
+def answers_match(pred: str | None, gt: str | None) -> bool:
+    """Check if predicted answer matches ground truth using sympy parsing."""
+    if pred is None or gt is None:
+        return False
 
+    parsed_pred = parse_answer(pred)
+    parsed_gt = parse_answer(gt)
 
-def _canonicalize_interval(s: str) -> str:
-    """Normalize interval string: remove whitespace, normalize separators."""
-    s = re.sub(r"\s+", "", s)
-    s = s.replace(";", ",")
-    return s
+    if parsed_pred is None or parsed_gt is None:
+        return False
 
+    # Direct comparison for int/float
+    if isinstance(parsed_pred, (int, float)) and isinstance(parsed_gt, (int, float)):
+        return abs(parsed_pred - parsed_gt) < 1e-9
 
-def _canonicalize_set(s: str) -> str:
-    """Normalize set string: convert LaTeX braces to {}, remove whitespace."""
-    s = s.strip()
-    s = s.replace(r"\left\{", "{").replace(r"\right\}", "}")
-    s = s.replace(r"\{", "{").replace(r"\}", "}")
-    s = re.sub(r"\s+", "", s)
-    return s
-
-
-def canonicalize_answer(ans: str) -> tuple[str | None, any]:
-    """
-    Returns a tagged canonical form:
-      ("num", float) for scalars
-      ("interval", str) for intervals
-      ("set", str) for sets
-      (None, None) for unhandled
-    """
-    if ans is None:
-        return (None, None)
-
-    s = ans.strip()
-
-    # Interval like [-2,7], (0,1], etc.
-    if _INTERVAL_RE.match(s) and (s[0] in "[(") and (s[-1] in "])"):
-        return ("interval", _canonicalize_interval(s))
-
-    # Set: LaTeX braces
-    if (r"\{" in s) or (s.startswith("{") and s.endswith("}")):
-        return ("set", _canonicalize_set(s))
-
-    # Percentage
-    if r"\%" in s:
-        s2 = s.replace(r"\%", "")
+    # Sympy expression comparison
+    if isinstance(parsed_pred, Expr) and isinstance(parsed_gt, Expr):
         try:
-            return ("num", float(N(parse_latex(s2))) / 100.0)
+            return simplify(parsed_pred - parsed_gt) == 0
         except Exception:
-            return (None, None)
+            return False
 
-    # Numeric / fraction / dfrac
+    # Mixed types - try numeric comparison
     try:
-        return ("num", float(N(parse_latex(s))))
-    except Exception:
-        return (None, None)
-
-
-def answers_match(pred: str, gt: str) -> bool:
-    """Check if predicted answer matches ground truth, handling different types."""
-    p_tag, p_val = canonicalize_answer(pred)
-    g_tag, g_val = canonicalize_answer(gt)
-
-    if p_tag is None or g_tag is None:
-        return False
-    if p_tag != g_tag:
-        return False
-    if p_tag in ("interval", "set"):
-        return p_val == g_val
-    # numeric
-    return math.isclose(p_val, g_val, rel_tol=1e-6)
+        return abs(float(parsed_pred) - float(parsed_gt)) < 1e-9
+    except (ValueError, TypeError):
+        return str(parsed_pred) == str(parsed_gt)
 
 
 
