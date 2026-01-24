@@ -7,13 +7,22 @@ from datetime import datetime
 from datasets import load_from_disk
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from peft import PeftModel
+from sympy import simplify, Expr
 
-SYSTEM_PROMPT = """
-Return your response in this exact format:
-<think>
-...
-</think>
-<answer>...</answer>
+import sys
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from process_data import parse_answer
+
+
+SYSTEM_PROMPT = """You must reply in exactly this format and output nothing else:
+
+<think>Step-by-step reasoning here.</think><answer>Final answer only.</answer>
+
+Rules:
+- Do not include any text before <think> or after </answer>.
+- Put all reasoning in <think>.
+- Put only the final answer in <answer> (no explanation).
+- If the answer is numeric, output only the number (no commas, no units).
 """
 
 def load_model(base_model_path: str, adapter_path: str):
@@ -54,16 +63,33 @@ def parse_response(response: str) -> tuple[bool, str | None]:
     return False, None
 
 
-def normalize_answer(answer: str) -> str | None:
-    """Normalize to canonical numeric form."""
-    if answer is None:
-        return None
-    answer = str(answer).strip().replace(",", "").replace("$", "").replace("%", "")
+def compare_answers(extracted: str | None, expected: str | None) -> bool:
+    """Compare answers using sympy parsing."""
+    if extracted is None or expected is None:
+        return False
+
+    parsed_extracted = parse_answer(extracted)
+    parsed_expected = parse_answer(expected)
+
+    if parsed_extracted is None or parsed_expected is None:
+        return False
+
+    # Direct comparison for int/float
+    if isinstance(parsed_extracted, (int, float)) and isinstance(parsed_expected, (int, float)):
+        return abs(parsed_extracted - parsed_expected) < 1e-9
+
+    # Sympy expression comparison
+    if isinstance(parsed_extracted, Expr) and isinstance(parsed_expected, Expr):
+        try:
+            return simplify(parsed_extracted - parsed_expected) == 0
+        except Exception:
+            return False
+
+    # Mixed types - try numeric comparison
     try:
-        num = float(answer)
-        return str(int(num)) if num == int(num) else str(num)
-    except ValueError:
-        return None
+        return abs(float(parsed_extracted) - float(parsed_expected)) < 1e-9
+    except (ValueError, TypeError):
+        return str(parsed_extracted) == str(parsed_expected)
 
 def evaluate(model, tokenizer, test_dataset, output_path: str | None = None):
     format_valid = 0
@@ -72,38 +98,33 @@ def evaluate(model, tokenizer, test_dataset, output_path: str | None = None):
     results = []
 
     for i, example in enumerate(tqdm(test_dataset)):
-        response = generate_response(model, tokenizer, example["question"])
+        response = generate_response(model, tokenizer, example["problem"])
         valid, extracted = parse_response(response)
 
         expected_raw = example["answer"].strip()
-        expected_norm = normalize_answer(expected_raw)
-        extracted_norm = normalize_answer(extracted) if extracted else None
         is_correct = False
 
         if valid:
             format_valid += 1
-            # Compare normalized numeric answers
-            if extracted_norm is not None and extracted_norm == expected_norm:
+            if compare_answers(extracted, expected_raw):
                 is_correct = True
                 correct += 1
 
         # Store result for debugging
         result = {
             "id": i,
-            "question": example["question"],
+            "problem": example["problem"],
             "expected_answer": expected_raw,
-            "expected_normalized": expected_norm,
             "raw_response": response,
             "format_valid": valid,
             "extracted_answer": extracted,
-            "extracted_normalized": extracted_norm,
             "is_correct": is_correct,
         }
         results.append(result)
 
         if i < 5:
-            print(f"[{i}] Expected: {expected_raw} -> {expected_norm}")
-            print(f"[{i}] Extracted: {extracted} -> {extracted_norm}")
+            print(f"[{i}] Expected: {expected_raw}")
+            print(f"[{i}] Extracted: {extracted}")
             print(f"[{i}] Correct: {is_correct}")
             print(response)
             print('-------------------------------------\n')
@@ -146,9 +167,9 @@ def evaluate(model, tokenizer, test_dataset, output_path: str | None = None):
             for r in results:
                 status = "✓ CORRECT" if r["is_correct"] else ("✗ WRONG" if r["format_valid"] else "✗ BAD FORMAT")
                 f.write(f"[{r['id']}] {status}\n")
-                f.write(f"Question: {r['question']}\n")
-                f.write(f"Expected: {r['expected_answer']} (normalized: {r['expected_normalized']})\n")
-                f.write(f"Extracted: {r['extracted_answer']} (normalized: {r['extracted_normalized']})\n")
+                f.write(f"Problem: {r['problem']}\n")
+                f.write(f"Expected: {r['expected_answer']}\n")
+                f.write(f"Extracted: {r['extracted_answer']}\n")
                 f.write(f"--- Raw Response ---\n")
                 f.write(f"{r['raw_response']}\n")
                 f.write(f"\n{'-'*80}\n\n")
