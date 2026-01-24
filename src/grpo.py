@@ -140,7 +140,7 @@ def load_model_and_tokenizer(config: dict, resume_checkpoint: str | None = None)
         trust_remote_code=True,
         torch_dtype=torch.bfloat16,
         use_cache=False,
-        attn_implementation="sdpa",
+        attn_implementation="flash_attention_2",
     )
 
     # Sync tokenizer special tokens with model config
