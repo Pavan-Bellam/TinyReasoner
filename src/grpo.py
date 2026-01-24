@@ -57,35 +57,15 @@ def parse_response(response: str) -> tuple[bool, str | None]:
     return False, None
 
 
-def make_reward_funcs(format_weight: float = 0.2, correctness_weight: float = 1.0):
+def make_reward_fn(correct_reward: float = 1.0, wrong_reward: float = -0.1, invalid_format_reward: float = -0.05):
+    """
+    Gated reward: format validity gates correctness.
+    - Invalid format: invalid_format_reward (-0.05)
+    - Valid format + correct: correct_reward (+1.0)
+    - Valid format + wrong: wrong_reward (-0.1)
+    """
 
-    def format_reward_fn(completions: list[str], **kwargs) -> list[float]:
-        rewards = []
-        format_valid_count = 0
-
-        for completion in completions:
-            valid, _ = parse_response(completion)
-            if valid:
-                rewards.append(format_weight)
-                format_valid_count += 1
-            else:
-                rewards.append(0.0)
-
-        if wandb.run is not None:
-            wandb.log({
-                "custom/format_accuracy": format_valid_count / max(1, len(completions)),
-                "custom/format_valid_count": format_valid_count,
-                "custom/n_samples": len(completions),
-            })
-
-        return rewards
-
-    def correctness_reward_fn(
-        completions: list[str],
-        answer: list[str],
-        **kwargs
-    ) -> list[float]:
-
+    def reward_fn(completions: list[str], answer: list[str], **kwargs) -> list[float]:
         rewards = []
         correct_count = 0
         format_valid_count = 0
@@ -94,30 +74,29 @@ def make_reward_funcs(format_weight: float = 0.2, correctness_weight: float = 1.
             valid, extracted = parse_response(completion)
 
             if not valid:
-                rewards.append(0.0)
+                rewards.append(invalid_format_reward)
                 continue
 
             format_valid_count += 1
 
             if answers_match(extracted, gt):
-                rewards.append(correctness_weight)
+                rewards.append(correct_reward)
                 correct_count += 1
             else:
-                rewards.append(0.0)
+                rewards.append(wrong_reward)
 
         if wandb.run is not None:
             wandb.log({
+                "custom/format_accuracy": format_valid_count / max(1, len(completions)),
                 "custom/answer_accuracy": correct_count / max(1, len(completions)),
-                "custom/correct_count": correct_count,
                 "custom/accuracy_given_valid_format": (
                     correct_count / format_valid_count if format_valid_count > 0 else 0.0
                 ),
-                "custom/n_samples": len(completions),
             })
 
         return rewards
 
-    return format_reward_fn, correctness_reward_fn
+    return reward_fn
 
 
 
@@ -385,9 +364,10 @@ def main(config_path: str, resume: str | None = None):
     eval_data = eval_data.rename_column("problem", "prompt")
     eval_data = eval_data.select_columns(["prompt", "answer"])
 
-    format_reward_fn, correctness_reward_fn = make_reward_funcs(
-        format_weight=grpo_config.get("format_reward", 0.2),
-        correctness_weight=grpo_config.get("correctness_reward", 1.0),
+    reward_fn = make_reward_fn(
+        correct_reward=grpo_config.get("correct_reward", 1.0),
+        wrong_reward=grpo_config.get("wrong_reward", -0.1),
+        invalid_format_reward=grpo_config.get("invalid_format_reward", -0.05),
     )
 
     training_args = GRPOConfig(
@@ -421,7 +401,7 @@ def main(config_path: str, resume: str | None = None):
         args=training_args,
         train_dataset=train_data,
         processing_class=tokenizer,
-        reward_funcs=[format_reward_fn, correctness_reward_fn],
+        reward_funcs=[reward_fn],
     )
 
     # Add PASS@1 and PASS@K eval callback

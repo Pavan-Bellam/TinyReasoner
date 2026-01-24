@@ -33,9 +33,10 @@ grpo:
   max_grad_norm: 1.0
   bf16: True
   use_gradient_checkpointing: True
-  # Rewards
-  format_reward: 0.2
-  correctness_reward: 1.0
+  # Rewards (gated: format validity gates correctness)
+  correct_reward: 1.0
+  wrong_reward: -0.1
+  invalid_format_reward: -0.05
   # Logging & saving
   logging_steps: 10
   save_steps: 100
