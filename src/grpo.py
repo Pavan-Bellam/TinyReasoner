@@ -19,6 +19,18 @@ from sympy import simplify, Expr
 
 from process_data import parse_answer
 
+SYSTEM_PROMPT = """You must reply in exactly this format and output nothing else:
+
+<think>Step-by-step reasoning here.</think><answer>Final answer only.</answer>
+
+Rules:
+- Do not include any text before <think> or after </answer>.
+- Put all reasoning in <think>.
+- Put only the final answer in <answer> (no explanation).
+- If the answer is numeric, output only the number (no commas, no units).
+"""
+
+
 
 def answers_match(pred: str | None, gt: str | None) -> bool:
     """Check if predicted answer matches ground truth using sympy parsing."""
@@ -80,18 +92,19 @@ def make_reward_fn(
 
         for i, (completion, gt) in enumerate(zip(completions, answer)):
             valid, extracted = parse_response(completion)
+            is_correct = False
 
             if not valid:
                 reward = invalid_format_reward
-                rewards.append(reward)
             else:
                 format_valid_count += 1
                 if answers_match(extracted, gt):
                     reward = correct_reward
                     correct_count += 1
+                    is_correct = True
                 else:
                     reward = wrong_reward
-                rewards.append(reward)
+            rewards.append(reward)
 
             if debug_path:
                 debug_records.append({
@@ -102,7 +115,7 @@ def make_reward_fn(
                     "expected": gt,
                     "extracted": extracted,
                     "format_valid": valid,
-                    "correct": valid and answers_match(extracted, gt),
+                    "correct": is_correct,
                     "reward": reward,
                 })
 
@@ -380,16 +393,26 @@ def main(config_path: str, resume: str | None = None):
 
     logger.info(f"Loading dataset from {config['data']['path']}")
     train_data = load_from_disk(config["data"]["path"])
-    train_data = train_data.rename_column("problem", "prompt")
     logger.info(f"Full dataset size: {len(train_data)}")
 
     # Filter to only Level 3-5 (harder problems) for GRPO
     train_data = train_data.filter(lambda x: x["level"] in ["Level 3", "Level 4", "Level 5"])
     logger.info(f"Filtered to Level 3-5: {len(train_data)}")
+
+    # Format prompts with chat template and system prompt
+    def format_prompt(example):
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": example["problem"]},
+        ]
+        example["prompt"] = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        return example
+
+    train_data = train_data.map(format_prompt)
     train_data = train_data.select_columns(["prompt", "answer"])
 
     eval_data = load_from_disk(config['data']['eval_path'])
-    eval_data = eval_data.rename_column("problem", "prompt")
+    eval_data = eval_data.map(format_prompt)
     eval_data = eval_data.select_columns(["prompt", "answer"])
 
     debug_path = grpo_config.get("debug_generations_path")
