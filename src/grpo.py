@@ -57,33 +57,61 @@ def parse_response(response: str) -> tuple[bool, str | None]:
     return False, None
 
 
-def make_reward_fn(correct_reward: float = 1.0, wrong_reward: float = -0.1, invalid_format_reward: float = -0.05):
+def make_reward_fn(
+    correct_reward: float = 1.0,
+    wrong_reward: float = -0.1,
+    invalid_format_reward: float = -0.05,
+    debug_path: str | None = None,
+):
     """
     Gated reward: format validity gates correctness.
     - Invalid format: invalid_format_reward (-0.05)
     - Valid format + correct: correct_reward (+1.0)
     - Valid format + wrong: wrong_reward (-0.1)
     """
+    import json
+    batch_idx = [0]
 
-    def reward_fn(completions: list[str], answer: list[str], **kwargs) -> list[float]:
+    def reward_fn(completions: list[str], answer: list[str], prompt: list[str] | None = None, **kwargs) -> list[float]:
         rewards = []
         correct_count = 0
         format_valid_count = 0
+        debug_records = []
 
-        for completion, gt in zip(completions, answer):
+        for i, (completion, gt) in enumerate(zip(completions, answer)):
             valid, extracted = parse_response(completion)
 
             if not valid:
-                rewards.append(invalid_format_reward)
-                continue
-
-            format_valid_count += 1
-
-            if answers_match(extracted, gt):
-                rewards.append(correct_reward)
-                correct_count += 1
+                reward = invalid_format_reward
+                rewards.append(reward)
             else:
-                rewards.append(wrong_reward)
+                format_valid_count += 1
+                if answers_match(extracted, gt):
+                    reward = correct_reward
+                    correct_count += 1
+                else:
+                    reward = wrong_reward
+                rewards.append(reward)
+
+            if debug_path:
+                debug_records.append({
+                    "batch": batch_idx[0],
+                    "idx": i,
+                    "prompt": prompt[i] if prompt else None,
+                    "completion": completion,
+                    "expected": gt,
+                    "extracted": extracted,
+                    "format_valid": valid,
+                    "correct": valid and answers_match(extracted, gt),
+                    "reward": reward,
+                })
+
+        if debug_path and debug_records:
+            with open(debug_path, "a", encoding="utf-8") as f:
+                for rec in debug_records:
+                    f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+
+        batch_idx[0] += 1
 
         if wandb.run is not None:
             wandb.log({
@@ -364,10 +392,15 @@ def main(config_path: str, resume: str | None = None):
     eval_data = eval_data.rename_column("problem", "prompt")
     eval_data = eval_data.select_columns(["prompt", "answer"])
 
+    debug_path = grpo_config.get("debug_generations_path")
+    if debug_path:
+        logger.info(f"Debug mode: saving generations to {debug_path}")
+
     reward_fn = make_reward_fn(
         correct_reward=grpo_config.get("correct_reward", 1.0),
         wrong_reward=grpo_config.get("wrong_reward", -0.1),
         invalid_format_reward=grpo_config.get("invalid_format_reward", -0.05),
+        debug_path=debug_path,
     )
 
     training_args = GRPOConfig(
