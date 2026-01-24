@@ -1,16 +1,13 @@
-"""
-Data processing script for TinyReasoner.
-
-Downloads MATH dataset, formats for SFT training, tokenizes, and saves.
-Run this ONCE before training.
-
-Usage:
-    python src/process_data.py --model Qwen/Qwen2.5-3B-Instruct --max-length 1024
-"""
-
-import argparse
+import regex as re  # NOT the built-in re; needed for recursive patterns
+from sympy import simplify, Expr
+from sympy.parsing.latex import parse_latex
+from sympy import Equality
 from datasets import load_dataset, concatenate_datasets
+from sklearn.model_selection import train_test_split
 from transformers import AutoTokenizer
+import argparse
+from sympy import Rational, Mul, Add, Pow, Symbol
+from loguru import logger
 
 SUBSETS = [
     'algebra',
@@ -24,12 +21,7 @@ SUBSETS = [
 
 SYSTEM_PROMPT = """You must reply in exactly this format and output nothing else:
 
-<think>
-Step-by-step reasoning here.
-</think>
-<answer>
-Final answer only.
-</answer>
+<think>Step-by-step reasoning here.</think><answer>Final answer only.</answer>
 
 Rules:
 - Do not include any text before <think> or after </answer>.
@@ -38,213 +30,220 @@ Rules:
 - If the answer is numeric, output only the number (no commas, no units).
 """
 
+BOXED_PAT = re.compile(r"\\boxed\s*\{((?:[^{}]+|\{(?1)\})*)\}")
 
-def last_boxed_only_string(string: str) -> str | None:
-    """Extract the last \\boxed{...} or \\fbox{...} element from a string."""
-    idx = string.rfind("\\boxed")
-    if idx < 0:
-        idx = string.rfind("\\fbox")
-        if idx < 0:
-            return None
+INTERVAL_PAT = re.compile(
+    r"""
+    ^[\(\[]                      # opening ( or [
+    \s*[^,]+?\s*                 # left endpoint (anything, lazy)
+    ,\s*[^,]+?\s*                # right endpoint
+    [\)\]]$                      # closing ) or ]
+    """,
+    re.VERBOSE,
+)
 
-    i = idx
-    right_brace_idx = None
-    num_left_braces_open = 0
-    while i < len(string):
-        if string[i] == "{":
-            num_left_braces_open += 1
-        if string[i] == "}":
-            num_left_braces_open -= 1
-            if num_left_braces_open == 0:
-                right_brace_idx = i
-                break
-        i += 1
+NUM_PAT = re.compile(
+    r"""
+    ^\s*
+    \\?\$?\s*                    # optional $ or \$
+    ([+-]?(
+        (\d+(\.\d*)?) |          # 3, 3., 3.14
+        (\.\d+)                  # .3
+    )([eE][+-]?\d+)?)
+    \s*$
+    """,
+    re.VERBOSE,
+)
 
-    if right_brace_idx is None:
+
+
+def _parse_num(s: str) -> int | float | None:
+    """Parse a simple numeric string to int or float."""
+    m = NUM_PAT.fullmatch(s)
+    if not m:
         return None
-
-    return string[idx:right_brace_idx + 1]
-
-
-def remove_boxed(s: str) -> str | None:
-    """Remove \\boxed{} wrapper, return inner content."""
-    if s is None:
-        return None
-    if s.startswith("\\boxed{"):
-        return s[7:-1]
-    if s.startswith("\\fbox{"):
-        return s[6:-1]
-    return s
+    num = m.group(1)
+    if "." in num or "e" in num.lower():
+        return float(num)
+    return int(num)
 
 
-def extract_answer(solution: str) -> str | None:
-    """Extract final answer from solution."""
-    boxed = last_boxed_only_string(solution)
-    return remove_boxed(boxed)
+def _strip_latex_cruft(s: str) -> str:
+    """Remove \\text{...} and common unit words."""
+    s = re.sub(r"\\text\{[^}]*\}", "", s)
+    s = re.sub(r"\b(euros?|dollars?|meters?|cm|kg)\b", "", s, flags=re.I)
+    return s.strip()
 
 
-def format_example(example: dict) -> dict | None:
-    """Format a single example as chat text. Returns None if answer extraction fails."""
-    answer = extract_answer(example['solution'])
+
+
+
+def parse_answer(answer: str | None) -> int | float | str | Expr | None:
+    """
+    Parse an extracted answer into a comparable form.
+
+    Args:
+        answer: Raw answer string (output of extract_answer)
+
+    Returns:
+        - int/float for numeric answers
+        - str for interval notation (preserved as-is)
+        - sympy.Expr for symbolic expressions (Rational, Mul, Add, Pow, Symbol only)
+        - None if unparseable
+    """
     if answer is None:
         return None
 
-    cot = example['solution'].strip()
-    assistant_content = f"<think>\n{cot}\n</think>\n<answer>\n{answer}\n</answer>"
+    valid_types = (int, float, Rational, Mul, Add, Pow, Symbol)
 
-    return {
-        "system": SYSTEM_PROMPT,
-        "user": example['problem'],
-        "assistant": assistant_content,
-    }
+    answer = str(answer)
 
+    if not answer:
+        return None
 
-def process_example(example: dict, tokenizer) -> dict:
-    formatted = format_example(example)
-    if formatted is None:
-        return {
-            "prompt": None,
-            "answer": None,
-            "level": None,
-            "subject": None,
-            "input_ids": None,
-            "attention_mask": None,
-            "labels": None,
-        }
+    # Preserve interval notation as string
+    if INTERVAL_PAT.fullmatch(answer):
+        return None
 
-    # ---- GRPO fields ----
-    grpo_messages = [
-        {"role": "system", "content": formatted["system"]},
-        {"role": "user", "content": formatted["user"]},
-    ]
-    prompt = tokenizer.apply_chat_template(
-        grpo_messages,
-        tokenize=False,
-        add_generation_prompt=True,
-    )
+    # Try LaTeX -> SymPy
+    try:
+        expr = parse_latex(answer)
 
-    # ground truth answer (raw LaTeX extracted from boxed)
-    answer = extract_answer(example["solution"])
+        if isinstance(expr, Equality):
+            expr = expr.rhs
 
-    # metadata for curriculum/filtering in GRPO
-    level = example.get("level", None)
-    subject = example.get("type", None)  # MATH dataset uses "type" for subject
+        expr = simplify(expr)
 
-    # ---- SFT fields (your current behavior) ----
-    sft_messages = [
-        {"role": "system", "content": formatted["system"]},
-        {"role": "user", "content": formatted["user"]},
-        {"role": "assistant", "content": formatted["assistant"]},
-    ]
-    full = tokenizer.apply_chat_template(sft_messages, tokenize=False)
-    prefix = tokenizer.apply_chat_template(sft_messages[:-1], tokenize=False)
+        if expr.free_symbols:
+            # Check if valid type
+            if isinstance(expr, valid_types):
+                return expr
+            return None
 
-    out = tokenizer(full, add_special_tokens=False)
-    prefix_tokens = tokenizer(prefix, add_special_tokens=False)
+        evaluated = expr.evalf()
 
-    assistant_start = len(prefix_tokens["input_ids"])
-    eos = tokenizer.eos_token_id
+        if evaluated.is_Integer:
+            return int(evaluated)
+        if evaluated.is_real:
+            return float(evaluated)
 
-    out["input_ids"] = out["input_ids"] + [eos]
-    out["attention_mask"] = out["attention_mask"] + [1]
-    out["labels"] = out["input_ids"].copy()
-    out["labels"][:assistant_start] = [-100] * assistant_start
+        # Check if valid type before returning
+        if isinstance(expr, valid_types):
+            return expr
+        return None
 
-    return {
-        # GRPO
-        "prompt": prompt,
-        "answer": answer,
-        "level": level,
-        "subject": subject,
-
-        # SFT
-        "input_ids": out["input_ids"],
-        "attention_mask": out["attention_mask"],
-        "labels": out["labels"],
-    }
+    except Exception:
+        return _parse_num(answer)
 
 
+def extract_answer(text: str) -> str | None:
+    """
+    Extract the last \\boxed{...} from text.
+    Only returns answer if it's parseable.
 
-def load_math_dataset():
-    """Load and concatenate all MATH subsets."""
-    print("Loading MATH dataset...")
+    Returns:
+        - Raw string content from boxed (with latex cruft stripped)
+        - None if no boxed content found or unparseable
+    """
+    text = str(text)
+
+    matches = list(BOXED_PAT.finditer(text))
+    if not matches:
+        return None
+
+    answer = matches[-1].group(1)
+    answer = _strip_latex_cruft(answer)
+    
+    if not answer:
+        return None
+    
+    parsed =parse_answer(answer)
+    # Only keep if parseable
+    if parsed is not None:
+        return answer
+    
+    return None
+
+def get_tokenizer_fn(tokenizer):
+    def tokenize_example(example):
+        ass_response = f"<think>{example['solution']}</think><answer>{example['answer']}</answer> "
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": example['problem']},
+            {"role": "assistant", "content": ass_response}
+        ]
+
+        full_message = tokenizer.apply_chat_template(messages, tokenize=False)
+        prefix = tokenizer.apply_chat_template(messages[:-1], tokenize=False)
+        out = tokenizer(full_message, add_special_tokens=False)
+        prefix_tokens = tokenizer(prefix, add_special_tokens=False)
+        assistant_start = len(prefix_tokens["input_ids"])
+        eos = tokenizer.eos_token_id
+
+        out["input_ids"] = out["input_ids"] + [eos]
+        out["attention_mask"] = out["attention_mask"] + [1]
+        out["labels"] = out["input_ids"].copy()
+        out["labels"][:assistant_start] = [-100] * assistant_start
+
+        return out
+
+
+    return tokenize_example
+
+
+
+def main(model_name: str, max_length: int, val_ratio: float):
+    
+    logger.info("Loading datasets")
     train_datasets = [load_dataset("EleutherAI/hendrycks_math", s, split="train") for s in SUBSETS]
     test_datasets = [load_dataset("EleutherAI/hendrycks_math", s, split="test") for s in SUBSETS]
 
-    train = concatenate_datasets(train_datasets)
-    test = concatenate_datasets(test_datasets)
+    train_ds = concatenate_datasets(train_datasets)
+    test_ds = concatenate_datasets(test_datasets)
 
-    print(f"Raw train: {len(train)}, Raw test: {len(test)}")
-    return train, test
+    logger.info(f"Raw sizes: Train: {len(train_ds)} | Test: {len(test_ds)}")
 
+    def add_answer(example):
+        example['answer'] = extract_answer(example['solution'])
+        return example
 
-def process_split(dataset, tokenizer, max_length: int, desc: str):
-    """Process a dataset split: tokenize, filter, return."""
-    print(f"\nProcessing {desc}...")
-    original_size = len(dataset)
+    logger.info("Processing Train Dataset")
+    train_ds = train_ds.map(add_answer)
+    train_ds = train_ds.filter(lambda x: x['answer'] is not None)
 
-    processed = dataset.map(
-        lambda x: process_example(x, tokenizer),
-        remove_columns=dataset.column_names,
-        desc=f"Tokenizing {desc}"
-    )
+    logger.info("Processing Test Dataset")
+    test_ds = test_ds.map(add_answer)
+    test_ds = test_ds.filter(lambda x: x['answer'] is not None)
 
-    # Filter out failed examples and those exceeding max_length
-    processed = processed.filter(
-        lambda x: x["input_ids"] is not None
-        and x["prompt"] is not None
-        and x["answer"] is not None
-    )
-    processed = processed.filter(lambda x: len(x["input_ids"]) <= max_length)
+    logger.info(f"After answer extraction: Train: {len(train_ds)} | Test: {len(test_ds)}")
 
+    logger.info("Tokenizing")
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    tokenize_fn = get_tokenizer_fn(tokenizer=tokenizer)
 
-    print(f"{desc}: {original_size} -> {len(processed)}")
-    return processed
+    train_ds = train_ds.map(tokenize_fn)
+    train_ds = train_ds.filter(lambda x: len(x['input_ids']) <= max_length)
 
+    test_ds = test_ds.map(tokenize_fn)
+    test_ds = test_ds.filter(lambda x: len(x['input_ids']) <= max_length)
 
-def main(model_id: str, max_length: int, val_ratio: float):
-    print(f"Model: {model_id}")
-    print(f"Max length: {max_length}")
-    print(f"Val ratio: {val_ratio}")
+    logger.info(f"After length filter: Train: {len(train_ds)} | Test: {len(test_ds)}")
 
-    # Load tokenizer
-    print(f"\nLoading tokenizer...")
-    tokenizer = AutoTokenizer.from_pretrained(model_id)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
+    # Split test into val/test
+    split = test_ds.train_test_split(test_size=1-val_ratio, seed=42)
+    val_ds = split['train']
+    test_ds = split['test']
 
-    # Load raw data
-    train_raw, test_raw = load_math_dataset()
+    train_ds = train_ds.shuffle(seed=42)
 
-    # Process
-    train = process_split(train_raw, tokenizer, max_length, "train")
-    test = process_split(test_raw, tokenizer, max_length, "test")
+    logger.info(f"Final sizes: Train: {len(train_ds)} | Val: {len(val_ds)} | Test: {len(test_ds)}")
+    logger.info("Saving datasets to data/")
 
-    # Sample val from test
-    val_size = int(len(test) * val_ratio)
-    val = test.shuffle(seed=42).select(range(val_size))
-    print(f"Val: {len(val)} ({val_ratio*100:.0f}% of test)")
+    train_ds.save_to_disk("data/train")
+    val_ds.save_to_disk("data/val")
+    test_ds.save_to_disk("data/test")
 
-    # Show sample
-    print("\n" + "=" * 60)
-    print("SAMPLE (decoded)")
-    print("=" * 60)
-    sample = tokenizer.decode(train[0]["input_ids"])
-    print(sample[:500] + "..." if len(sample) > 500 else sample)
-
-    # Save
-    print("\nSaving...")
-    train.save_to_disk("data/train")
-    val.save_to_disk("data/val")
-    test.save_to_disk("data/test")
-
-    print(f"\nDone! Saved to data/{{train,val,test}}")
-    print(f"  Train: {len(train)}")
-    print(f"  Val: {len(val)}")
-    print(f"  Test: {len(test)}")
-
-
-if __name__ == "__main__":
+if __name__=="__main__":
     parser = argparse.ArgumentParser(description="Process MATH dataset for SFT")
     parser.add_argument("--model", type=str, default="Qwen/Qwen2.5-3B-Instruct")
     parser.add_argument("--max-length", type=int, default=1024)
