@@ -42,6 +42,14 @@ def load_model(base_model_path: str, sft_adapter_path: str, grpo_adapter_path: s
     model = PeftModel.from_pretrained(model, sft_adapter_path)
     model = model.merge_and_unload()
 
+    # Remove leftover PEFT metadata to prevent multi-adapter warning
+    for attr in ("peft_config", "active_adapter"):
+        if hasattr(model, attr):
+            try:
+                delattr(model, attr)
+            except Exception:
+                pass
+
     # Load GRPO adapter
     model = PeftModel.from_pretrained(model, grpo_adapter_path)
     model.eval()
