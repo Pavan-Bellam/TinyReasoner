@@ -77,7 +77,7 @@ def load_model(config: dict, adapter_path: str | None = None):
         trust_remote_code=True,
         dtype=torch.bfloat16,
         use_cache=False,
-        attn_implementation="sdpa",
+        attn_implementation="flash_attention_2",
     )
 
 
