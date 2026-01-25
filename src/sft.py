@@ -109,7 +109,6 @@ def load_model(config: dict, adapter_path: str | None = None):
 
 def setup_wandb(config: dict, full_config: dict):
     if not config.get("enabled", False) or not is_main_process():
-        os.environ["WANDB_DISABLED"] = "true"
         return None
 
     run = wandb.init(
@@ -173,7 +172,7 @@ def main(config_path: str, resume: str | None = None):
         dataloader_num_workers=train_cfg.get("dataloader_num_workers", 0),
         remove_unused_columns=False,
         save_safetensors=True,
-        report_to="wandb" if wandb_config.get("enabled", False) else "none",
+        report_to="wandb" if wandb_config.get("enabled", False) and is_main_process() else "none",
         run_name=wandb_config.get("run_name"),
         dataset_kwargs={"skip_prepare_dataset": True},
     )
