@@ -13,12 +13,11 @@ import argparse
 import os
 
 import torch
-import wandb
 import yaml
 from datasets import load_from_disk
 from loguru import logger
 from peft import LoraConfig, PeftModel, get_peft_model, prepare_model_for_kbit_training
-from transformers import AutoModelForCausalLM, BitsAndBytesConfig, AutoTokenizer, DataCollatorForSeq2Seq
+from transformers import AutoModelForCausalLM, BitsAndBytesConfig, AutoTokenizer, DataCollatorForSeq2Seq, Trainer, TrainingArguments
 from trl import SFTConfig, SFTTrainer
 
 
@@ -107,26 +106,11 @@ def load_model(config: dict, adapter_path: str | None = None):
     return model
 
 
-def setup_wandb(config: dict, full_config: dict):
-    if not config.get("enabled", False) or not is_main_process():
-        return None
-
-    run = wandb.init(
-        project=config.get("project", "tinyreasoner"),
-        name=config.get("run_name"),
-        config=full_config,
-        resume="allow",
-    )
-    log_info(f"Wandb: {run.url}")
-    return run
-
-
 def main(config_path: str, resume: str | None = None):
     with open(config_path) as f:
         config = yaml.safe_load(f)
 
     wandb_config = config.get("wandb", {})
-    setup_wandb(wandb_config, config)
 
     model = load_model(config, adapter_path=resume)
     tokenizer = AutoTokenizer.from_pretrained(config["model"]["path"], trust_remote_code=True)
@@ -147,7 +131,7 @@ def main(config_path: str, resume: str | None = None):
     ckpt_cfg = config["ckpt"]
     log_cfg = config["logging"]
 
-    training_args = SFTConfig(
+    training_args = TrainingArguments(
         output_dir=ckpt_cfg["output_dir"],
         num_train_epochs=train_cfg["epochs"],
         per_device_train_batch_size=train_cfg["per_device_train_batch_size"],
@@ -172,9 +156,8 @@ def main(config_path: str, resume: str | None = None):
         dataloader_num_workers=train_cfg.get("dataloader_num_workers", 0),
         remove_unused_columns=False,
         save_safetensors=True,
-        report_to="wandb" if wandb_config.get("enabled", False) and is_main_process() else "none",
+        report_to="wandb" if wandb_config.get("enabled", False) else "none",
         run_name=wandb_config.get("run_name"),
-        dataset_kwargs={"skip_prepare_dataset": True},
     )
     data_collator = DataCollatorForSeq2Seq(
         tokenizer=tokenizer,
@@ -183,7 +166,7 @@ def main(config_path: str, resume: str | None = None):
         return_tensors="pt",
     )
 
-    trainer = SFTTrainer(
+    trainer = Trainer(
         model=model,
         args=training_args,
         train_dataset=train_data,
@@ -193,9 +176,6 @@ def main(config_path: str, resume: str | None = None):
 
     log_info("Starting training...")
     trainer.train(resume_from_checkpoint=resume)
-
-    if wandb_config.get("enabled", False) and is_main_process():
-        wandb.finish()
 
     log_info("Training complete!")
 
