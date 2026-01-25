@@ -146,8 +146,9 @@ def evaluate(
     output_path: str | None = None,
     k: int = 4,
     temperature: float = 0.7,
+    pass1_only: bool = False,
 ):
-    """Evaluate model with both pass@1 (greedy) and pass@k (sampled) metrics."""
+    """Evaluate model with pass@1 (greedy) and optionally pass@k (sampled) metrics."""
     total = len(test_dataset)
     results = []
 
@@ -173,25 +174,26 @@ def evaluate(
                 is_correct_pass1 = True
 
         # === PASS@K (sampled) ===
-        responses_sampled = generate_responses_sampled(model, tokenizer, problem, k, temperature)
-
         any_valid_k = False
         any_correct_k = False
         sampled_extractions = []
 
-        for resp in responses_sampled:
-            valid_k, extracted_k = parse_response(resp)
-            is_correct_k = valid_k and compare_answers(extracted_k, expected)
-            sampled_extractions.append({
-                "response": resp[:500],
-                "format_valid": valid_k,
-                "extracted": extracted_k,
-                "correct": is_correct_k,
-            })
-            if valid_k:
-                any_valid_k = True
-                if is_correct_k:
-                    any_correct_k = True
+        if not pass1_only:
+            responses_sampled = generate_responses_sampled(model, tokenizer, problem, k, temperature)
+
+            for resp in responses_sampled:
+                valid_k, extracted_k = parse_response(resp)
+                is_correct_k = valid_k and compare_answers(extracted_k, expected)
+                sampled_extractions.append({
+                    "response": resp[:500],
+                    "format_valid": valid_k,
+                    "extracted": extracted_k,
+                    "correct": is_correct_k,
+                })
+                if valid_k:
+                    any_valid_k = True
+                    if is_correct_k:
+                        any_correct_k = True
 
         # Update stats
         stats[subject][level]["total"] += 1
@@ -285,32 +287,33 @@ def evaluate(
     passk_table.append(overall_passk)
 
     df_pass1 = pd.DataFrame(pass1_table).set_index("Subject")
-    df_passk = pd.DataFrame(passk_table).set_index("Subject")
 
     # Print results
     print("\n" + "=" * 80)
-    print(f"GRPO EVALUATION RESULTS (n={total}, k={k}, temp={temperature})")
+    print(f"GRPO EVALUATION RESULTS (n={total})")
     print("=" * 80)
 
     print(f"\nPass@1 Accuracy by Subject and Level:")
     print(df_pass1.to_string())
     print(f"\nPass@1 Overall: {total_pass1_correct}/{total} = {total_pass1_correct/total*100:.2f}%")
 
-    print(f"\nPass@{k} Accuracy by Subject and Level:")
-    print(df_passk.to_string())
-    print(f"\nPass@{k} Overall: {total_passk_correct}/{total} = {total_passk_correct/total*100:.2f}%")
-
     # Summary
     summary = {
         "total": total,
-        "k": k,
-        "temperature": temperature,
         "pass1_correct": total_pass1_correct,
         "pass1_accuracy": total_pass1_correct / total,
-        "passk_correct": total_passk_correct,
-        "passk_accuracy": total_passk_correct / total,
         "timestamp": datetime.now().isoformat(),
     }
+
+    if not pass1_only:
+        df_passk = pd.DataFrame(passk_table).set_index("Subject")
+        print(f"\nPass@{k} Accuracy by Subject and Level (k={k}, temp={temperature}):")
+        print(df_passk.to_string())
+        print(f"\nPass@{k} Overall: {total_passk_correct}/{total} = {total_passk_correct/total*100:.2f}%")
+        summary["k"] = k
+        summary["temperature"] = temperature
+        summary["passk_correct"] = total_passk_correct
+        summary["passk_accuracy"] = total_passk_correct / total
 
     # Save results
     if output_path:
@@ -323,9 +326,12 @@ def evaluate(
 
         csv_path = output_path.replace(".json", "_pass1.csv")
         df_pass1.to_csv(csv_path)
-        csv_path_k = output_path.replace(".json", f"_pass{k}.csv")
-        df_passk.to_csv(csv_path_k)
-        print(f"Tables saved to: {csv_path}, {csv_path_k}")
+        print(f"Table saved to: {csv_path}")
+
+        if not pass1_only:
+            csv_path_k = output_path.replace(".json", f"_pass{k}.csv")
+            df_passk.to_csv(csv_path_k)
+            print(f"Pass@{k} table saved to: {csv_path_k}")
 
     return summary, results
 
@@ -341,6 +347,7 @@ if __name__ == "__main__":
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--k", type=int, default=4)
     parser.add_argument("--temperature", type=float, default=0.7)
+    parser.add_argument("--pass1-only", action="store_true", help="Only evaluate pass@1, skip pass@k")
     args = parser.parse_args()
 
     model, tokenizer = load_model(args.base_model, args.sft_adapter, args.grpo_adapter)
@@ -355,4 +362,5 @@ if __name__ == "__main__":
         output_path=args.output,
         k=args.k,
         temperature=args.temperature,
+        pass1_only=args.pass1_only,
     )
