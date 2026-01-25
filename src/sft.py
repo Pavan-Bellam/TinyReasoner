@@ -19,7 +19,8 @@ from loguru import logger
 from peft import LoraConfig, PeftModel, get_peft_model, prepare_model_for_kbit_training
 from transformers import AutoModelForCausalLM, BitsAndBytesConfig, AutoTokenizer, DataCollatorForSeq2Seq, Trainer, TrainingArguments
 from trl import SFTConfig, SFTTrainer
-
+import time
+import torch.distributed as dist
 
 def is_main_process() -> bool:
     """Check if current process is the main process (rank 0)."""
@@ -174,6 +175,51 @@ def main(config_path: str, resume: str | None = None):
         data_collator=data_collator,
     )
 
+
+    rank = int(os.environ.get("LOCAL_RANK", 0))
+
+    def sync():
+        if dist.is_available() and dist.is_initialized():
+            dist.barrier()
+
+    print(f"[Rank {rank}] PROBE: building dataloader", flush=True)
+
+    t0 = time.time()
+    dl = trainer.get_train_dataloader()
+    sync()
+    t1 = time.time()
+    print(f"[Rank {rank}] PROBE: dataloader built in {t1-t0:.3f}s", flush=True)
+
+    print(f"[Rank {rank}] PROBE: fetching first batch", flush=True)
+
+    t2 = time.time()
+    it = iter(dl)
+    batch = next(it)
+    sync()
+    t3 = time.time()
+    print(f"[Rank {rank}] PROBE: first batch in {t3-t2:.3f}s", flush=True)
+
+    device = next(model.parameters()).device
+    batch = {k: (v.to(device) if hasattr(v, "to") else v) for k, v in batch.items()}
+
+    print(f"[Rank {rank}] PROBE: running first forward", flush=True)
+
+    t4 = time.time()
+    out = model(**batch)
+    loss = out.loss
+    sync()
+    t5 = time.time()
+    print(f"[Rank {rank}] PROBE: forward in {t5-t4:.3f}s (loss={loss.item():.4f})", flush=True)
+
+    print(f"[Rank {rank}] PROBE: running first backward", flush=True)
+
+    t6 = time.time()
+    loss.backward()
+    sync()
+    t7 = time.time()
+    print(f"[Rank {rank}] PROBE: backward in {t7-t6:.3f}s", flush=True)
+
+    print(f"[Rank {rank}] PROBE: done warmup probe", flush=True)
     log_info("Starting training...")
     trainer.train(resume_from_checkpoint=resume)
 
