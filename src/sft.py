@@ -175,7 +175,7 @@ def main(config_path: str, resume: str | None = None):
         save_safetensors=True,
         report_to="wandb" if wandb_config.get("enabled", False) else "none",
         run_name=wandb_config.get("run_name"),
-        max_length=4096
+        dataset_kwargs={"skip_prepare_dataset": True},
     )
     data_collator = DataCollatorForSeq2Seq(
         tokenizer=tokenizer,
