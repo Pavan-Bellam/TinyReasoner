@@ -34,7 +34,7 @@ def get_tokenize_fn(tokenizer):
     return tokenize_example
 
 
-def main(model_name: str, val_ratio: float=0.05):
+def main(model_name: str, val_ratio: float=0.05, max_length=4096):
     ds = load_dataset("qingy2024/QwQ-LongCoT-Verified-130K", "verified")
     ds = ds["train"]
 
@@ -43,6 +43,10 @@ def main(model_name: str, val_ratio: float=0.05):
     tokenize_fn = get_tokenize_fn(tokenizer=tokenizer)
 
     ds = ds.map(tokenize_fn, remove_columns=ds.column_names)
+    before_count = len(ds)
+    ds = ds.filter(lambda x: len(x["input_ids"]) <= max_length)
+    after_count = len(ds)
+    print(f"Filtered: {before_count} -> {after_count} ({before_count - after_count} removed)")
 
     split = ds.train_test_split(test_size=val_ratio, seed=42)
     train_ds = split['train']

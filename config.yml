@@ -1,5 +1,5 @@
 model:
-  path: "Qwen/Qwen2.5-0.5B-Instruct"
+  path: "Qwen/Qwen2.5-3B-Instruct"
 
 quant:
   enabled: False
@@ -19,17 +19,17 @@ lora:
   bias: "none"
 
 data:
-  path: "data/gsm8k_train"
-  eval_path: "data/gsm8k_test"
+  path: "data/qwq/train"
+  eval_path: "data/qwq/val"
 
 seed: 42
 
 train:
   epochs: 3
-  per_device_train_batch_size: 4
+  per_device_train_batch_size: 3
   per_device_eval_batch_size: 2
-  gradient_accumulation_steps: 4
-  learning_rate: 0.0002
+  gradient_accumulation_steps: 3
+  learning_rate: 0.00005
   lr_scheduler: "cosine"
   warmup_ratio: 0.03
   weight_decay: 0.01

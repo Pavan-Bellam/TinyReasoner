@@ -21,6 +21,7 @@ from transformers import AutoModelForCausalLM, BitsAndBytesConfig, AutoTokenizer
 from trl import SFTConfig, SFTTrainer
 import time
 import torch.distributed as dist
+import wandb
 
 def is_main_process() -> bool:
     """Check if current process is the main process (rank 0)."""
@@ -106,12 +107,27 @@ def load_model(config: dict, adapter_path: str | None = None):
 
     return model
 
+def setup_wandb(config: dict, full_config: dict):
+    if not config.get("enabled", False) or not is_main_process():
+        return None  # Just return, don't disable
+
+    run = wandb.init(
+        project=config.get("project", "tinyreasoner"),
+        name=config.get("run_name"),
+        config=full_config,
+        resume="allow",
+    )
+    log_info(f"Wandb: {run.url}")
+    return run
 
 def main(config_path: str, resume: str | None = None):
     with open(config_path) as f:
         config = yaml.safe_load(f)
-
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    if torch.cuda.is_available():
+        torch.cuda.set_device(local_rank)
     wandb_config = config.get("wandb", {})
+    setup_wandb(wandb_config, config)
 
     model = load_model(config, adapter_path=resume)
     tokenizer = AutoTokenizer.from_pretrained(config["model"]["path"], trust_remote_code=True)
@@ -159,6 +175,9 @@ def main(config_path: str, resume: str | None = None):
         save_safetensors=True,
         report_to="wandb" if wandb_config.get("enabled", False) else "none",
         run_name=wandb_config.get("run_name"),
+        logging_first_step=True,
+        disable_tqdm=False,
+        log_level="info",
     )
     data_collator = DataCollatorForSeq2Seq(
         tokenizer=tokenizer,
@@ -174,6 +193,10 @@ def main(config_path: str, resume: str | None = None):
         eval_dataset=val_data,
         data_collator=data_collator,
     )
+    """
+    print(f"[Rank {os.environ.get('LOCAL_RANK', 0)}] Dataset length: {len(train_data)}", flush=True)
+    print(f"[Rank {os.environ.get('LOCAL_RANK', 0)}] First example keys: {train_data[0].keys()}", flush=True)
+    print(f"[Rank {os.environ.get('LOCAL_RANK', 0)}] Model device: {next(model.parameters()).device}", flush=True)
 
 
     rank = int(os.environ.get("LOCAL_RANK", 0))
@@ -186,7 +209,6 @@ def main(config_path: str, resume: str | None = None):
 
     t0 = time.time()
     dl = trainer.get_train_dataloader()
-    sync()
     t1 = time.time()
     print(f"[Rank {rank}] PROBE: dataloader built in {t1-t0:.3f}s", flush=True)
 
@@ -195,7 +217,6 @@ def main(config_path: str, resume: str | None = None):
     t2 = time.time()
     it = iter(dl)
     batch = next(it)
-    sync()
     t3 = time.time()
     print(f"[Rank {rank}] PROBE: first batch in {t3-t2:.3f}s", flush=True)
 
@@ -207,7 +228,6 @@ def main(config_path: str, resume: str | None = None):
     t4 = time.time()
     out = model(**batch)
     loss = out.loss
-    sync()
     t5 = time.time()
     print(f"[Rank {rank}] PROBE: forward in {t5-t4:.3f}s (loss={loss.item():.4f})", flush=True)
 
@@ -215,11 +235,11 @@ def main(config_path: str, resume: str | None = None):
 
     t6 = time.time()
     loss.backward()
-    sync()
     t7 = time.time()
     print(f"[Rank {rank}] PROBE: backward in {t7-t6:.3f}s", flush=True)
 
     print(f"[Rank {rank}] PROBE: done warmup probe", flush=True)
+    """
     log_info("Starting training...")
     trainer.train(resume_from_checkpoint=resume)
 
