@@ -17,10 +17,11 @@ import yaml
 from datasets import load_from_disk
 from loguru import logger
 from peft import LoraConfig, PeftModel, get_peft_model, prepare_model_for_kbit_training
-from transformers import AutoModelForCausalLM, BitsAndBytesConfig, AutoTokenizer, DataCollatorForSeq2Seq, Trainer, TrainingArguments
+from transformers import AutoModelForCausalLM, BitsAndBytesConfig, AutoTokenizer, DataCollatorForSeq2Seq, Trainer, TrainingArguments, TrainerCallback
 from trl import SFTConfig, SFTTrainer
 import time
 import torch.distributed as dist
+import wandb
 
 def is_main_process() -> bool:
     """Check if current process is the main process (rank 0)."""
@@ -106,12 +107,102 @@ def load_model(config: dict, adapter_path: str | None = None):
 
     return model
 
+def setup_wandb(config: dict, full_config: dict):
+    if not config.get("enabled", False) or not is_main_process():
+        return None  # Just return, don't disable
+
+    run = wandb.init(
+        project=config.get("project", "tinyreasoner"),
+        name=config.get("run_name"),
+        config=full_config,
+        resume="allow",
+    )
+    log_info(f"Wandb: {run.url}")
+    return run
+
+def _write_eval_samples(
+    model,
+    tokenizer,
+    eval_dataset,
+    output_dir: str,
+    epoch: float | None,
+    global_step: int,
+    num_examples: int = 2,
+    max_new_tokens: int = 256,
+):
+    if not is_main_process():
+        return
+    if eval_dataset is None or len(eval_dataset) == 0:
+        return
+
+    num_examples = min(num_examples, len(eval_dataset))
+    samples = [eval_dataset[i] for i in range(num_examples)]
+
+    model.eval()
+    device = next(model.parameters()).device
+
+    lines = []
+    lines.append("=" * 80)
+    lines.append(f"Eval samples | epoch={epoch} | step={global_step}")
+    lines.append("=" * 80)
+
+    with torch.no_grad():
+        for idx, sample in enumerate(samples, start=1):
+            input_ids = torch.tensor(sample["input_ids"], device=device).unsqueeze(0)
+            attention_mask = torch.tensor(sample["attention_mask"], device=device).unsqueeze(0)
+
+            generated = model.generate(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                max_new_tokens=max_new_tokens,
+                do_sample=False,
+            )
+
+            prompt_text = tokenizer.decode(input_ids[0], skip_special_tokens=True)
+            output_text = tokenizer.decode(generated[0], skip_special_tokens=True)
+
+            lines.append(f"[Example {idx}]")
+            lines.append("--- Prompt ---")
+            lines.append(prompt_text)
+            lines.append("--- Output ---")
+            lines.append(output_text)
+            lines.append("")
+
+    os.makedirs(output_dir, exist_ok=True)
+    out_path = os.path.join(output_dir, "eval_samples.txt")
+    with open(out_path, "a", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+
+    log_info(f"Wrote eval samples to {out_path}")
+
+class EvalSampleCallback(TrainerCallback):
+    def __init__(self, tokenizer, eval_dataset, output_dir: str):
+        self._tokenizer = tokenizer
+        self._eval_dataset = eval_dataset
+        self._output_dir = output_dir
+
+    def on_evaluate(self, args, state, control, **kwargs):
+        model = kwargs.get("model")
+        if model is None:
+            return control
+        _write_eval_samples(
+            model=model,
+            tokenizer=self._tokenizer,
+            eval_dataset=self._eval_dataset,
+            output_dir=self._output_dir,
+            epoch=state.epoch,
+            global_step=state.global_step,
+        )
+        return control
 
 def main(config_path: str, resume: str | None = None):
     with open(config_path) as f:
         config = yaml.safe_load(f)
-
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    if torch.cuda.is_available():
+        torch.cuda.set_device(local_rank)
     wandb_config = config.get("wandb", {})
+    setup_wandb(wandb_config, config)
 
     model = load_model(config, adapter_path=resume)
     tokenizer = AutoTokenizer.from_pretrained(config["model"]["path"], trust_remote_code=True)
@@ -159,6 +250,9 @@ def main(config_path: str, resume: str | None = None):
         save_safetensors=True,
         report_to="wandb" if wandb_config.get("enabled", False) else "none",
         run_name=wandb_config.get("run_name"),
+        logging_first_step=True,
+        disable_tqdm=False,
+        log_level="info",
     )
     data_collator = DataCollatorForSeq2Seq(
         tokenizer=tokenizer,
@@ -173,53 +267,9 @@ def main(config_path: str, resume: str | None = None):
         train_dataset=train_data,
         eval_dataset=val_data,
         data_collator=data_collator,
+        callbacks=[EvalSampleCallback(tokenizer, val_data, ckpt_cfg["output_dir"])],
     )
-
-
-    rank = int(os.environ.get("LOCAL_RANK", 0))
-
-    def sync():
-        if dist.is_available() and dist.is_initialized():
-            dist.barrier()
-
-    print(f"[Rank {rank}] PROBE: building dataloader", flush=True)
-
-    t0 = time.time()
-    dl = trainer.get_train_dataloader()
-    sync()
-    t1 = time.time()
-    print(f"[Rank {rank}] PROBE: dataloader built in {t1-t0:.3f}s", flush=True)
-
-    print(f"[Rank {rank}] PROBE: fetching first batch", flush=True)
-
-    t2 = time.time()
-    it = iter(dl)
-    batch = next(it)
-    sync()
-    t3 = time.time()
-    print(f"[Rank {rank}] PROBE: first batch in {t3-t2:.3f}s", flush=True)
-
-    device = next(model.parameters()).device
-    batch = {k: (v.to(device) if hasattr(v, "to") else v) for k, v in batch.items()}
-
-    print(f"[Rank {rank}] PROBE: running first forward", flush=True)
-
-    t4 = time.time()
-    out = model(**batch)
-    loss = out.loss
-    sync()
-    t5 = time.time()
-    print(f"[Rank {rank}] PROBE: forward in {t5-t4:.3f}s (loss={loss.item():.4f})", flush=True)
-
-    print(f"[Rank {rank}] PROBE: running first backward", flush=True)
-
-    t6 = time.time()
-    loss.backward()
-    sync()
-    t7 = time.time()
-    print(f"[Rank {rank}] PROBE: backward in {t7-t6:.3f}s", flush=True)
-
-    print(f"[Rank {rank}] PROBE: done warmup probe", flush=True)
+    
     log_info("Starting training...")
     trainer.train(resume_from_checkpoint=resume)
 
