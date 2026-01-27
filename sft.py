@@ -22,7 +22,6 @@ model = AutoModelForCausalLM.from_pretrained(
     MODEL_NAME,
     dtype=torch.bfloat16,
     attn_implementation="flash_attention_2",
-    use_cache=False
 )
 
 
@@ -44,10 +43,9 @@ training_args = SFTConfig(
     max_length=MAX_SEQ_LENGTH,
     packing=True,
     gradient_checkpointing=True,
-    gradient_checkpointing_kwargs={"use_reentrant": False},
     bf16=True,
     lr_scheduler_type="cosine",
-    warmup_ratio=0.1,
+    warmup_steps=500,
     logging_steps=10,
     save_strategy="steps",
     save_steps=200,
