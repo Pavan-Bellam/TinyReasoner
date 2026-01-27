@@ -1,13 +1,10 @@
 model:
   path: "Qwen/Qwen2.5-3B-Instruct"
 
-# SFT adapter to merge into base model
-sft_adapter_path: "./checkpointing/final"
-
-# New LoRA config for GRPO training
+# LoRA config for GRPO training (applied directly to base model)
 lora:
-  r: 16
-  alpha: 32
+  r: 32
+  alpha: 64
   dropout: 0.05
   target_modules: ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
   bias: "none"
@@ -21,22 +18,22 @@ seed: 42
 grpo:
   output_dir: "./grpo_checkpoints"
   # Generation
-  num_generations: 4
+  num_generations: 8
   max_prompt_length: 512
   max_completion_length: 1024
   temperature: 0.7
   # Training
   learning_rate: 0.00005
-  per_device_train_batch_size: 2
-  gradient_accumulation_steps: 8
+  per_device_train_batch_size: 4
+  gradient_accumulation_steps: 2
   max_steps: 1000
   max_grad_norm: 1.0
   bf16: True
   use_gradient_checkpointing: True
-  # Rewards (gated: format validity gates correctness)
-  correct_reward: 1.0
-  wrong_reward: -0.1
-  invalid_format_reward: -0.05
+  # Rewards (based on \boxed{} extraction)
+  correct_reward: 1.0      # correct answer in \boxed{}
+  wrong_reward: 0.0        # wrong answer in \boxed{}
+  no_boxed_reward: 0.0     # no \boxed{} found
   # Debug (set to path to save generations, null to disable)
   debug_generations_path: "./debug_generations.jsonl"
   # Logging & saving
@@ -45,6 +42,8 @@ grpo:
   # Evaluation
   eval_steps: 100
   eval_max_examples: 256
+  eval_examples_path: "./eval_examples.txt"
+  eval_num_examples_to_save: 10
 
 wandb:
   enabled: True

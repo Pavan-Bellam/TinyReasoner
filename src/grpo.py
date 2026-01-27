@@ -1,9 +1,9 @@
 import os
-import re
 import yaml
 import argparse
 from dataclasses import dataclass
 
+import regex as re
 import torch
 import wandb
 from loguru import logger
@@ -13,73 +13,182 @@ from transformers import (
     AutoModelForCausalLM,
     TrainerCallback,
 )
-from peft import PeftModel, LoraConfig, get_peft_model
+from peft import LoraConfig, get_peft_model
 from trl import GRPOConfig, GRPOTrainer
-from sympy import simplify, Expr
+from sympy import simplify, Expr, Equality
+from sympy.parsing.latex import parse_latex
 
-from process_data import parse_answer
-
-SYSTEM_PROMPT = """You must reply in exactly this format and output nothing else:
-
-<think>Step-by-step reasoning here.</think><answer>Final answer only.</answer>
-
-Rules:
-- Do not include any text before <think> or after </answer>.
-- Put all reasoning in <think>.
-- Put only the final answer in <answer> (no explanation).
-- If the answer is numeric, output only the number (no commas, no units).
-"""
+# --- PATTERNS ---
+BOXED_PAT = re.compile(r"\\boxed\s*\{((?:[^{}]+|\{(?1)\})*)\}")
+TUPLE_PAT = re.compile(r"^\\?(?:left)?[\(\[]\s*(.+?)\s*,\s*(.+?)\s*\\?(?:right)?[\)\]]$")
+NUM_PAT = re.compile(r"^\s*\\?\$?\s*([+-]?((\d+(\.\d*)?)|(\.\d+))([eE][+-]?\d+)?)\s*$", re.VERBOSE)
+PMATRIX_PAT = re.compile(r"\\begin\{pmatrix\}(.+?)\\end\{pmatrix\}", re.DOTALL)
 
 
+def _parse_num(s: str):
+    m = NUM_PAT.fullmatch(s)
+    if not m:
+        return None
+    num = m.group(1)
+    return float(num) if ("." in num or "e" in num.lower()) else int(num)
 
-def answers_match(pred: str | None, gt: str | None) -> bool:
-    """Check if predicted answer matches ground truth using sympy parsing."""
-    if pred is None or gt is None:
-        return False
 
-    parsed_pred = parse_answer(pred)
-    parsed_gt = parse_answer(gt)
+def _strip_latex_cruft(s: str) -> str:
+    s = re.sub(r"\\text\{([^}]*)\}", r"\1", s)
+    s = re.sub(r"\^\\circ", "", s)
+    s = re.sub(r"\\circ", "", s)
+    s = re.sub(r"\b(euros?|dollars?|meters?|cm|kg)\b", "", s, flags=re.I)
+    return s.strip()
 
-    if parsed_pred is None or parsed_gt is None:
-        return False
 
-    # Direct comparison for int/float
-    if isinstance(parsed_pred, (int, float)) and isinstance(parsed_gt, (int, float)):
-        return abs(parsed_pred - parsed_gt) < 1e-9
+def extract_raw_boxed(text: str) -> str | None:
+    text = str(text)
+    matches = list(BOXED_PAT.finditer(text))
+    if not matches:
+        return None
+    return _strip_latex_cruft(matches[-1].group(1))
 
-    # Sympy expression comparison
-    if isinstance(parsed_pred, Expr) and isinstance(parsed_gt, Expr):
+
+def parse_vector(s: str):
+    """Parse \\begin{pmatrix}...\\end{pmatrix} into tuple of values."""
+    match = PMATRIX_PAT.fullmatch(s.strip())
+    if not match:
+        return None
+    content = match.group(1)
+    elements = re.split(r"\\\\", content)
+    parsed = []
+    for el in elements:
+        val = parse_single_value(el.strip())
+        if val is None:
+            return None
+        parsed.append(val)
+    return tuple(parsed) if parsed else None
+
+
+def parse_single_value(s: str):
+    s = s.strip()
+    if not s:
+        return None
+
+    # Try numeric first
+    num = _parse_num(s)
+    if num is not None:
+        return num
+
+    # Try sympy latex
+    try:
+        expr = parse_latex(s)
+        if isinstance(expr, Equality):
+            expr = expr.rhs
+        expr = simplify(expr)
+        if expr.free_symbols:
+            return expr
+        evaluated = expr.evalf()
+        if evaluated.is_Integer:
+            return int(evaluated)
+        if evaluated.is_real:
+            return float(evaluated)
+        return expr
+    except Exception:
+        pass
+
+    # Fallback: return cleaned string for text answers
+    cleaned = re.sub(r"\\text\{([^}]*)\}", r"\1", s).strip()
+    return cleaned if cleaned else None
+
+
+def parse_answer(text: str | None):
+    if text is None:
+        return None
+
+    text = str(text)
+    matches = list(BOXED_PAT.finditer(text))
+    if not matches:
+        return None
+    answer = _strip_latex_cruft(matches[-1].group(1))
+    if not answer:
+        return None
+
+    # Try vector/matrix first
+    vec = parse_vector(answer)
+    if vec is not None:
+        return vec
+
+    # Try tuple
+    tuple_match = TUPLE_PAT.fullmatch(answer)
+    if tuple_match:
+        left = parse_single_value(tuple_match.group(1))
+        right = parse_single_value(tuple_match.group(2))
+        if left is not None and right is not None:
+            return (left, right)
+        return None
+
+    return parse_single_value(answer)
+
+
+def compare_values(a, b) -> bool:
+    """Compare two parsed values."""
+    # Both numeric
+    if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+        return abs(a - b) < 1e-9
+
+    # Both sympy expressions
+    if isinstance(a, Expr) and isinstance(b, Expr):
         try:
-            return simplify(parsed_pred - parsed_gt) == 0
+            return simplify(a - b) == 0
         except Exception:
             return False
 
     # Mixed types - try numeric comparison
     try:
-        return abs(float(parsed_pred) - float(parsed_gt)) < 1e-9
+        return abs(float(a) - float(b)) < 1e-9
     except (ValueError, TypeError):
-        return str(parsed_pred) == str(parsed_gt)
+        return str(a).strip().lower() == str(b).strip().lower()
 
 
-def parse_response(response: str) -> tuple[bool, str | None]:
-    pattern = r"<think>.*?</think>\s*<answer>(.*?)</answer>"
-    match = re.search(pattern, response, re.DOTALL)
-    if match:
-        return True, match.group(1).strip()
-    return False, None
+def compare_answers(text_a, text_b) -> bool:
+    parsed_a = parse_answer(text_a)
+    parsed_b = parse_answer(text_b)
+
+    # Both parsed successfully
+    if parsed_a is not None and parsed_b is not None:
+        # Tuple comparison
+        if isinstance(parsed_a, tuple) and isinstance(parsed_b, tuple):
+            if len(parsed_a) != len(parsed_b):
+                return False
+            return all(compare_values(a, b) for a, b in zip(parsed_a, parsed_b))
+
+        if isinstance(parsed_a, tuple) or isinstance(parsed_b, tuple):
+            return False
+
+        return compare_values(parsed_a, parsed_b)
+
+    # Fallback: compare raw boxed content as strings
+    raw_a = extract_raw_boxed(text_a)
+    raw_b = extract_raw_boxed(text_b)
+
+    if raw_a is None or raw_b is None:
+        return False
+
+    return raw_a.strip().lower() == raw_b.strip().lower()
+
+
+SYSTEM_PROMPT = """Solve this math problem. Show your work step by step, then put your final answer in \\boxed{}.
+"""
+
 
 
 def make_reward_fn(
     correct_reward: float = 1.0,
-    wrong_reward: float = -0.1,
-    invalid_format_reward: float = -0.05,
+    wrong_reward: float = 0.0,
+    no_boxed_reward: float = 0.0,
     debug_path: str | None = None,
 ):
     """
-    Gated reward: format validity gates correctness.
-    - Invalid format: invalid_format_reward (-0.05)
-    - Valid format + correct: correct_reward (+1.0)
-    - Valid format + wrong: wrong_reward (-0.1)
+    Reward function for free-form output with \\boxed{} answer.
+    - No \\boxed{} found: no_boxed_reward (0.0)
+    - \\boxed{} correct: correct_reward (+1.0)
+    - \\boxed{} wrong: wrong_reward (0.0)
     """
     import json
     batch_idx = [0]
@@ -87,18 +196,19 @@ def make_reward_fn(
     def reward_fn(completions: list[str], answer: list[str], prompt: list[str] | None = None, **kwargs) -> list[float]:
         rewards = []
         correct_count = 0
-        format_valid_count = 0
+        has_boxed_count = 0
         debug_records = []
 
         for i, (completion, gt) in enumerate(zip(completions, answer)):
-            valid, extracted = parse_response(completion)
+            extracted = extract_raw_boxed(completion)
+            has_boxed = extracted is not None
             is_correct = False
 
-            if not valid:
-                reward = invalid_format_reward
+            if not has_boxed:
+                reward = no_boxed_reward
             else:
-                format_valid_count += 1
-                if answers_match(extracted, gt):
+                has_boxed_count += 1
+                if compare_answers(completion, gt):
                     reward = correct_reward
                     correct_count += 1
                     is_correct = True
@@ -114,7 +224,7 @@ def make_reward_fn(
                     "completion": completion,
                     "expected": gt,
                     "extracted": extracted,
-                    "format_valid": valid,
+                    "has_boxed": has_boxed,
                     "correct": is_correct,
                     "reward": reward,
                 })
@@ -128,10 +238,10 @@ def make_reward_fn(
 
         if wandb.run is not None:
             wandb.log({
-                "custom/format_accuracy": format_valid_count / max(1, len(completions)),
+                "custom/boxed_rate": has_boxed_count / max(1, len(completions)),
                 "custom/answer_accuracy": correct_count / max(1, len(completions)),
-                "custom/accuracy_given_valid_format": (
-                    correct_count / format_valid_count if format_valid_count > 0 else 0.0
+                "custom/accuracy_given_boxed": (
+                    correct_count / has_boxed_count if has_boxed_count > 0 else 0.0
                 ),
             })
 
@@ -145,7 +255,6 @@ def load_model_and_tokenizer(config: dict, resume_checkpoint: str | None = None)
     model_path = config["model"]["path"]
     grpo_config = config["grpo"]
     lora_config_dict = config["lora"]
-    sft_adapter_path = config["sft_adapter_path"]
     use_gradient_checkpointing = grpo_config.get("use_gradient_checkpointing", False)
 
     tokenizer = AutoTokenizer.from_pretrained(model_path)
@@ -173,30 +282,14 @@ def load_model_and_tokenizer(config: dict, resume_checkpoint: str | None = None)
         model.config.bos_token_id = tokenizer.bos_token_id
         model.generation_config.bos_token_id = tokenizer.bos_token_id
 
-    # Always merge SFT adapter first (GRPO adapter was trained on merged model)
-    logger.info(f"Loading SFT adapter from {sft_adapter_path}")
-    model = PeftModel.from_pretrained(model, sft_adapter_path)
-
-    logger.info("Merging SFT adapter into base model")
-    model = model.merge_and_unload()
-
-    # Remove leftover PEFT metadata to prevent multi-adapter warning
-    for attr in ("peft_config", "active_adapter"):
-        if hasattr(model, attr):
-            try:
-                delattr(model, attr)
-            except Exception:
-                pass
-
-    logger.info(f"After merge: is PeftModel={isinstance(model, PeftModel)}, has peft_config={hasattr(model, 'peft_config')}")
-
     if resume_checkpoint:
-        # Resuming from GRPO checkpoint - load existing GRPO adapter
-        logger.info(f"Loading GRPO adapter from checkpoint: {resume_checkpoint}")
+        # Resuming from checkpoint - load existing LoRA adapter
+        from peft import PeftModel
+        logger.info(f"Loading LoRA adapter from checkpoint: {resume_checkpoint}")
         model = PeftModel.from_pretrained(model, resume_checkpoint, is_trainable=True)
     else:
-        # Fresh GRPO training - create new GRPO adapter
-        logger.info("Creating new LoRA adapter for GRPO")
+        # Fresh training - create new LoRA adapter on base model
+        logger.info("Creating new LoRA adapter on base model")
         lora_config = LoraConfig(
             r=lora_config_dict["r"],
             lora_alpha=lora_config_dict["alpha"],
@@ -243,14 +336,21 @@ def evaluate_pass_metrics(
     k: int,
     device: torch.device | None = None,
     max_examples: int = 256,
+    examples_save_path: str | None = None,
+    num_examples_to_save: int = 10,
+    global_step: int | None = None,
 ):
     """
     Logs:
       - eval/pass1_accuracy: greedy/near-deterministic (do_sample=False)
       - eval/passk_accuracy: sampled with k returns (do_sample=True, temperature=temperature_train)
-      - eval/format_pass1_accuracy
-      - eval/format_passk_accuracy
+      - eval/boxed_pass1_rate: rate of \\boxed{} in greedy outputs
+      - eval/boxed_passk_rate: rate of any \\boxed{} in sampled outputs
+
+    Optionally saves example generations to a file.
     """
+    import json
+
     model_was_training = model.training
     model.eval()
 
@@ -262,10 +362,13 @@ def evaluate_pass_metrics(
 
     pass1_correct = 0
     passk_correct = 0
-    pass1_format = 0
-    passk_format = 0
+    pass1_boxed = 0
+    passk_boxed = 0
 
-    for ex in subset:
+    # Collect examples to save
+    examples_to_save = []
+
+    for idx, ex in enumerate(subset):
         prompt = ex["prompt"]
         gt = ex["answer"]
 
@@ -284,13 +387,25 @@ def evaluate_pass_metrics(
             max_new_tokens=max_completion_length,
             do_sample=False,
         )
-        # Only decode the completion, not the prompt
         text1 = tokenizer.decode(out1[0][prompt_len:], skip_special_tokens=True)
-        valid1, ans1 = parse_response(text1)
-        if valid1:
-            pass1_format += 1
-            if answers_match(ans1, gt):
+        boxed1 = extract_raw_boxed(text1)
+        is_correct = False
+        if boxed1 is not None:
+            pass1_boxed += 1
+            if compare_answers(text1, gt):
                 pass1_correct += 1
+                is_correct = True
+
+        # Save example if within limit
+        if examples_save_path and idx < num_examples_to_save:
+            examples_to_save.append({
+                "idx": idx,
+                "prompt": prompt,
+                "ground_truth": gt,
+                "generation": text1,
+                "extracted_boxed": boxed1,
+                "correct": is_correct,
+            })
 
         # PASS@K (sampled)
         outk = model.generate(
@@ -301,29 +416,43 @@ def evaluate_pass_metrics(
             num_return_sequences=k,
         )
 
-        any_valid = False
+        any_boxed = False
         any_correct = False
         for seq in outk:
-            # Only decode the completion, not the prompt
             textk = tokenizer.decode(seq[prompt_len:], skip_special_tokens=True)
-            validk, ansk = parse_response(textk)
-            if validk:
-                any_valid = True
-                if answers_match(ansk, gt):
+            boxedk = extract_raw_boxed(textk)
+            if boxedk is not None:
+                any_boxed = True
+                if compare_answers(textk, gt):
                     any_correct = True
                     break
 
-        if any_valid:
-            passk_format += 1
+        if any_boxed:
+            passk_boxed += 1
         if any_correct:
             passk_correct += 1
+
+    # Save examples to file
+    if examples_save_path and examples_to_save:
+        with open(examples_save_path, "a", encoding="utf-8") as f:
+            f.write(f"\n{'='*80}\n")
+            f.write(f"EVAL EXAMPLES @ step {global_step}\n")
+            f.write(f"{'='*80}\n\n")
+            for ex in examples_to_save:
+                f.write(f"--- Example {ex['idx']} ---\n")
+                f.write(f"Correct: {ex['correct']}\n")
+                f.write(f"Ground Truth: {ex['ground_truth']}\n")
+                f.write(f"Extracted: {ex['extracted_boxed']}\n")
+                f.write(f"Prompt:\n{ex['prompt']}\n\n")
+                f.write(f"Generation:\n{ex['generation']}\n")
+                f.write(f"\n{'-'*40}\n\n")
 
     metrics = {
         "eval/n_examples": n,
         "eval/pass1_accuracy": pass1_correct / max(1, n),
         "eval/passk_accuracy": passk_correct / max(1, n),
-        "eval/format_pass1_accuracy": pass1_format / max(1, n),
-        "eval/format_passk_accuracy": passk_format / max(1, n),
+        "eval/boxed_pass1_rate": pass1_boxed / max(1, n),
+        "eval/boxed_passk_rate": passk_boxed / max(1, n),
     }
 
     if wandb.run is not None:
@@ -339,6 +468,8 @@ def evaluate_pass_metrics(
 class EvalConfig:
     eval_steps: int = 100
     eval_max_examples: int = 256
+    examples_save_path: str | None = None
+    num_examples_to_save: int = 10
 
 
 class PassEvalCallback(TrainerCallback):
@@ -375,6 +506,9 @@ class PassEvalCallback(TrainerCallback):
             temperature_train=self.grpo_cfg["temperature"],
             k=self.grpo_cfg["num_generations"],
             max_examples=self.eval_cfg.eval_max_examples,
+            examples_save_path=self.eval_cfg.examples_save_path,
+            num_examples_to_save=self.eval_cfg.num_examples_to_save,
+            global_step=state.global_step,
         )
         logger.info(f"[eval @ step {state.global_step}] {metrics}")
         return control
@@ -421,8 +555,8 @@ def main(config_path: str, resume: str | None = None):
 
     reward_fn = make_reward_fn(
         correct_reward=grpo_config.get("correct_reward", 1.0),
-        wrong_reward=grpo_config.get("wrong_reward", -0.1),
-        invalid_format_reward=grpo_config.get("invalid_format_reward", -0.05),
+        wrong_reward=grpo_config.get("wrong_reward", 0.0),
+        no_boxed_reward=grpo_config.get("no_boxed_reward", 0.0),
         debug_path=debug_path,
     )
 
@@ -464,6 +598,8 @@ def main(config_path: str, resume: str | None = None):
     eval_cfg = EvalConfig(
         eval_steps=grpo_config.get("eval_steps", 100),
         eval_max_examples=grpo_config.get("eval_max_examples", 256),
+        examples_save_path=grpo_config.get("eval_examples_path"),
+        num_examples_to_save=grpo_config.get("eval_num_examples_to_save", 10),
     )
     trainer.add_callback(
         PassEvalCallback(
