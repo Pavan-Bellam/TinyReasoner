@@ -1,6 +1,6 @@
 import torch
 from datasets import load_dataset
-from transformers import AutoModelForCausalLm, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer
 from trl import SFTTrainer, SFTConfig
 
 
@@ -22,7 +22,7 @@ if tokenizer.pad_token is None:
     tokenizer.pad_token = tokenizer.eos_token
 
 print('Loading Model')
-model = AutoModelForCausalLm.from_pretrained(
+model = AutoModelForCausalLM.from_pretrained(
     MODEL_NAME,
     dtype=torch.bfloat16,
     attn_implementation="flash_attention_2",
@@ -31,22 +31,23 @@ model = AutoModelForCausalLm.from_pretrained(
 
 
 print("loading dataset....")
-dataset = load_dataset(DATASET_NAME, DATASET_CONFIG, split="train")
-print(f"Dataset size: {len(dataset)} examples")
+train_dataset = load_dataset(DATASET_NAME, DATASET_CONFIG, split="train")
+print(f"Dataset size: {len(train_dataset)} examples")
 
 
-print(f"Sample messages format: {dataset[0]['messages'][:1]}")
+
+print(f"Sample messages format: {train_dataset[0]['messages'][:1]}")
 
 
 training_args = SFTConfig(
     output_dir = OUTPUT_DIR,
     num_train_epochs=NUM_EPOCHS,
-    per_device_batch_size=PER_DEVICE_BATCH_SIZE,
+    per_device_train_batch_size=PER_DEVICE_BATCH_SIZE,
     gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS,
     learning_rate=LEARNING_RATE,
     max_length=MAX_SEQ_LENGTH,
     packing=True,
-    gradient_checkpoint=True,
+    gradient_checkpointing=True,
     gradient_checkpointing_kwargs={"use_reentrant": False},
     bf16=True,
     lr_scheduler_type="cosine",
@@ -56,7 +57,7 @@ training_args = SFTConfig(
     save_steps=200,
     save_total_limit=3,
     seed=42,
-    report_to="wandb",  
+    report_to="wandb",
     run_name="qwen3b-math-sft",
 )
 
@@ -64,7 +65,8 @@ trainer = SFTTrainer(
     model=model,
     tokenizer=tokenizer,
     args=training_args,
-    train_dataset=dataset,
+    train_dataset=train_dataset,
+
 )
 
 
