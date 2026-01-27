@@ -1,6 +1,6 @@
 import torch
 from datasets import load_dataset
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM
 from trl import SFTTrainer, SFTConfig
 
 
@@ -16,10 +16,6 @@ LEARNING_RATE = 5e-6  # Conservative for full fine-tune
 NUM_EPOCHS = 1
 
 
-print('Loading Tokenizer')
-tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-if tokenizer.pad_token is None:
-    tokenizer.pad_token = tokenizer.eos_token
 
 print('Loading Model')
 model = AutoModelForCausalLM.from_pretrained(
@@ -63,7 +59,6 @@ training_args = SFTConfig(
 
 trainer = SFTTrainer(
     model=model,
-    tokenizer=tokenizer,
     args=training_args,
     train_dataset=train_dataset,
 
