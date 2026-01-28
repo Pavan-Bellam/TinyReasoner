@@ -1,38 +1,51 @@
 from datasets import load_from_disk
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers import AutoTokenizer, AutoModelForCausalLM, DataCollatorForSeq2Seq
 import torch
 
 tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-3B-Instruct")
+tokenizer.pad_token = tokenizer.eos_token
+
 ds = load_from_disk("./openmath_tok_simple")
+data_collator = DataCollatorForSeq2Seq(tokenizer=tokenizer, padding=True)
 
-# Check 1: Valid token IDs?
-sample = ds[0]
-max_id = max(sample["input_ids"])
-vocab_size = tokenizer.vocab_size
-print(f"Max token ID: {max_id}, Vocab size: {vocab_size}")
-print(f"Valid: {max_id < vocab_size}")
-
-# Check 2: Any weird values?
-print(f"Min token ID: {min(sample['input_ids'])}")
-print(f"Any negative: {any(x < 0 for x in sample['input_ids'])}")
-
-# Check 3: Decode looks right?
-print(tokenizer.decode(sample["input_ids"][:200]))
-
-# Check 4: Labels exist and match?
-if "labels" in ds.column_names:
-    print(f"Labels == input_ids: {sample['labels'] == sample['input_ids']}")
-
-# Check 5: Try a forward pass
 model = AutoModelForCausalLM.from_pretrained(
     "Qwen/Qwen2.5-3B-Instruct",
     torch_dtype=torch.bfloat16,
+    attn_implementation="flash_attention_2",
     device_map="auto"
 )
 
-input_ids = torch.tensor([sample["input_ids"][:512]]).to(model.device)
-labels = input_ids.clone()
+# Enable gradient checkpointing like your training script
+model.gradient_checkpointing_enable()
 
-with torch.no_grad():
-    outputs = model(input_ids=input_ids, labels=labels)
-    print(f"Test loss: {outputs.loss.item()}")  # Should be 1-3, not 10^14
+model.train()
+optimizer = torch.optim.AdamW(model.parameters(), lr=2e-6)
+
+batch = data_collator([ds[i] for i in range(4)])
+input_ids = batch['input_ids'].to(model.device)
+attention_mask = batch['attention_mask'].to(model.device)
+labels = batch['labels'].to(model.device)
+
+# Forward
+outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+print(f"Forward loss: {outputs.loss.item()}")
+
+# Backward
+outputs.loss.backward()
+
+# Check gradients
+nan_params = []
+for name, param in model.named_parameters():
+    if param.grad is not None:
+        if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
+            nan_params.append(name)
+
+if nan_params:
+    print(f"NaN/Inf gradients in {len(nan_params)} params:")
+    for p in nan_params[:5]:
+        print(f"  {p}")
+else:
+    print("All gradients finite ✓")
+
+optimizer.step()
+print("Optimizer step completed")
