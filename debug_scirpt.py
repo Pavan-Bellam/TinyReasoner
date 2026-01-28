@@ -15,8 +15,10 @@ model = AutoModelForCausalLM.from_pretrained(
     device_map="auto"
 )
 
-# Enable gradient checkpointing like your training script
-model.gradient_checkpointing_enable()
+# THE FIX: use_reentrant=False
+model.gradient_checkpointing_enable(
+    gradient_checkpointing_kwargs={"use_reentrant": False}
+)
 
 model.train()
 optimizer = torch.optim.AdamW(model.parameters(), lr=2e-6)
@@ -26,26 +28,14 @@ input_ids = batch['input_ids'].to(model.device)
 attention_mask = batch['attention_mask'].to(model.device)
 labels = batch['labels'].to(model.device)
 
-# Forward
 outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
 print(f"Forward loss: {outputs.loss.item()}")
 
-# Backward
 outputs.loss.backward()
 
-# Check gradients
-nan_params = []
-for name, param in model.named_parameters():
-    if param.grad is not None:
-        if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
-            nan_params.append(name)
+nan_count = sum(1 for n, p in model.named_parameters() 
+                if p.grad is not None and (torch.isnan(p.grad).any() or torch.isinf(p.grad).any()))
+print(f"NaN/Inf gradient params: {nan_count}")
 
-if nan_params:
-    print(f"NaN/Inf gradients in {len(nan_params)} params:")
-    for p in nan_params[:5]:
-        print(f"  {p}")
-else:
-    print("All gradients finite ✓")
-
-optimizer.step()
-print("Optimizer step completed")
+if nan_count == 0:
+    print("✓ Gradients are clean")
