@@ -1,7 +1,9 @@
 import argparse
+import subprocess
+import threading
 import torch
 from datasets import load_dataset
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, TrainerCallback
 from trl import SFTTrainer, SFTConfig
 
 
@@ -20,6 +22,48 @@ LEARNING_RATE = 2e-6
 WEIGHT_DECAY = 0.01  
 NUM_EPOCHS = 1
 WARMUP_STEPS  = 10  # ~3% warmup
+
+S3_CKPT_PATH = "s3://tinyreasoner-1437/stage-1/ckpts/"
+
+
+def upload_to_s3(local_path: str, s3_path: str, blocking: bool = False):
+    """Upload a directory to S3 using aws cli."""
+    def _upload():
+        cmd = ["aws", "s3", "sync", local_path, s3_path, "--quiet"]
+        print(f"Uploading {local_path} -> {s3_path}")
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            print(f"S3 upload failed: {result.stderr}")
+        else:
+            print(f"Upload complete: {local_path}")
+
+    if blocking:
+        _upload()
+    else:
+        threading.Thread(target=_upload, daemon=True).start()
+
+
+class S3UploadCallback(TrainerCallback):
+    def __init__(self, s3_base_path: str):
+        self.s3_base_path = s3_base_path
+        self.tested = False
+
+    def on_step_end(self, args, state, control, **kwargs):
+        # Upload at first step to verify S3 works
+        if not self.tested and state.global_step == 1:
+            self.tested = True
+            # Force a save at step 1
+            control.should_save = True
+        return control
+
+    def on_save(self, args, state, control, **kwargs):
+        ckpt_dir = f"{args.output_dir}/checkpoint-{state.global_step}"
+        s3_dest = f"{self.s3_base_path}checkpoint-{state.global_step}/"
+        # First save is blocking to verify S3 works, rest are background
+        blocking = not self.tested
+        upload_to_s3(ckpt_dir, s3_dest, blocking=blocking)
+        return control
+
 
 def main(resume_from: str | None = None):
     print('Loading Model')
@@ -73,6 +117,7 @@ def main(resume_from: str | None = None):
         model=model,
         args=training_args,
         train_dataset=train_dataset,
+        callbacks=[S3UploadCallback(S3_CKPT_PATH)],
     )
 
     print("Starting Training")
@@ -81,6 +126,7 @@ def main(resume_from: str | None = None):
     print("Saving Model")
     trainer.save_model(f"{OUTPUT_DIR}/final")
     tokenizer.save_pretrained(f"{OUTPUT_DIR}/final")
+    upload_to_s3(f"{OUTPUT_DIR}/final", f"{S3_CKPT_PATH}final/", blocking=True)
 
 
 if __name__ == "__main__":
