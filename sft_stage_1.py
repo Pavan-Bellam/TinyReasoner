@@ -46,7 +46,6 @@ def upload_to_s3(local_path: str, s3_path: str, blocking: bool = False):
 class S3UploadCallback(TrainerCallback):
     def __init__(self, s3_base_path: str):
         self.s3_base_path = s3_base_path
-        self.did_first_upload = False
 
     def on_step_end(self, args, state, control, **kwargs):
         if state.global_step == 1:
@@ -54,11 +53,11 @@ class S3UploadCallback(TrainerCallback):
         return control
 
     def on_save(self, args, state, control, **kwargs):
+        if not state.is_world_process_zero:
+            return control
         ckpt_dir = f"{args.output_dir}/checkpoint-{state.global_step}"
         s3_dest = f"{self.s3_base_path}checkpoint-{state.global_step}/"
-        blocking = not self.did_first_upload
-        upload_to_s3(ckpt_dir, s3_dest, blocking=blocking)
-        self.did_first_upload = True
+        upload_to_s3(ckpt_dir, s3_dest)
         return control
 
 
