@@ -9,17 +9,17 @@ MODEL_NAME = "Qwen/Qwen2.5-3B-Instruct"
 OUTPUT_DIR = "./qwen3b-math-sft-stage1"
 DATASET_NAME = "nvidia/OpenMathInstruct-2"
 DATASET_CONFIG = "default"
-DATASET_SPLIT = "train_1M"
+DATASET_SPLIT = "train_2M"
 
 SYSTEM_PROMPT = "You are a helpful math reasoning assistant. Solve the problem step by step."
 
 MAX_SEQ_LENGTH = 4096
-PER_DEVICE_BATCH_SIZE = 8
+PER_DEVICE_BATCH_SIZE = 4
 GRADIENT_ACCUMULATION_STEPS = 32  # 4 GPUs × 4 batch × 32 accum = 512
 LEARNING_RATE = 2e-6  
 WEIGHT_DECAY = 0.01  
 NUM_EPOCHS = 1
-WARMUP_STEPS  = 100  # ~3% warmup
+WARMUP_STEPS  = 10  # ~3% warmup
 
 def main(resume_from: str | None = None):
     print('Loading Model')
@@ -57,14 +57,16 @@ def main(resume_from: str | None = None):
         gradient_checkpointing=True,
         bf16=True,
         lr_scheduler_type="cosine",
-        warmup_steps=500,
-        logging_steps=10,
+        warmup_steps=WARMUP_STEPS,
+        logging_steps=5,
         save_strategy="steps",
-        save_steps=200,
+        save_steps=50,
         save_total_limit=3,
         seed=42,
         report_to="wandb",
         run_name="qwen3b-math-sft-stage1",
+	dataset_num_proc = 128,
+	weight_decay=WEIGHT_DECAY
     )
 
     trainer = SFTTrainer(
