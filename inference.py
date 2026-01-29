@@ -1,3 +1,4 @@
+import argparse
 import asyncio
 import json
 import time
@@ -9,14 +10,27 @@ import numpy as np
 from tqdm import tqdm
 
 # Configuration
-VLLM_URL = "http://localhost:8000/v1"  # Update this
+VLLM_URL = "https://snk0db6yg4zrdj-8000.proxy.runpod.net/v1"  # Update this
 MODEL_NAME = "/workspace/TinyReasoner/checkpoint/ck-2800"
-OUTPUT_PATH = "./math500_results"
-CHECKPOINT_PATH = "./math500_checkpoint.json"
+
+BENCHMARKS = {
+    "math500": {
+        "dataset": ("HuggingFaceH4/MATH-500", None, "test"),
+        "prompt_col": "problem",
+        "output_path": "./math500_results",
+        "checkpoint_path": "./math500_checkpoint.json",
+    },
+    "gsm8k": {
+        "dataset": ("openai/gsm8k", "main", "test"),
+        "prompt_col": "question",
+        "output_path": "./gsm8k_results",
+        "checkpoint_path": "./gsm8k_checkpoint.json",
+    },
+}
 
 # Tuning parameters
-MAX_CONCURRENT = 500  # With DP=4 and long sequences, start conservative
-NUM_GENERATIONS = 5
+MAX_CONCURRENT = 100  # With DP=4 and long sequences, start conservative
+NUM_GENERATIONS = 1
 MAX_RETRIES = 3
 CHECKPOINT_INTERVAL = 20  # Save checkpoint every N completions
 
@@ -106,24 +120,22 @@ async def generate_single(prompt: str, max_tokens: int = 30768) -> tuple[str, Re
                 )
 
 
-def load_checkpoint() -> dict:
-    checkpoint_file = Path(CHECKPOINT_PATH)
+def load_checkpoint(path: str) -> dict:
+    checkpoint_file = Path(path)
     if checkpoint_file.exists():
         with open(checkpoint_file, "r") as f:
             data = json.load(f)
-            # Ensure completed_indices is a set for O(1) lookup
             data["completed_set"] = set(data.get("completed_indices", []))
             return data
     return {"completed_indices": [], "completed_set": set(), "results": {}}
 
 
-def save_checkpoint(checkpoint: dict):
-    # Don't save the set, just the list
+def save_checkpoint(checkpoint: dict, path: str):
     save_data = {
         "completed_indices": checkpoint["completed_indices"],
         "results": checkpoint["results"],
     }
-    with open(CHECKPOINT_PATH, "w") as f:
+    with open(path, "w") as f:
         json.dump(save_data, f)
 
 
@@ -132,6 +144,7 @@ async def process_all(
     indices: list[int],
     checkpoint: dict,
     stats: AggregateStats,
+    checkpoint_path: str,
 ) -> None:
     """Process all prompts using a continuous queue approach."""
 
@@ -166,7 +179,7 @@ async def process_all(
 
                 # Periodic checkpoint save
                 if completed_count - last_checkpoint_count >= CHECKPOINT_INTERVAL:
-                    save_checkpoint(checkpoint)
+                    save_checkpoint(checkpoint, checkpoint_path)
                     last_checkpoint_count = completed_count
 
             return rep_metrics
@@ -190,20 +203,25 @@ async def process_all(
                 })
 
     # Final checkpoint save
-    save_checkpoint(checkpoint)
+    save_checkpoint(checkpoint, checkpoint_path)
 
 
-async def main():
-    print("Loading dataset...")
-    dataset = load_dataset("HuggingFaceH4/MATH-500", split="test")
-    prompts = dataset["problem"]
+async def main(benchmark: str):
+    bench = BENCHMARKS[benchmark]
+    ds_name, ds_config, ds_split = bench["dataset"]
+    OUTPUT_PATH = bench["output_path"]
+    CHECKPOINT_PATH = bench["checkpoint_path"]
+
+    print(f"Loading {benchmark} dataset...")
+    dataset = load_dataset(ds_name, ds_config, split=ds_split) if ds_config else load_dataset(ds_name, split=ds_split)
+    prompts = dataset[bench["prompt_col"]]
     total_problems = len(prompts)
 
     print(f"Loaded {total_problems} problems")
     print(f"Config: MAX_CONCURRENT={MAX_CONCURRENT}, NUM_GENERATIONS={NUM_GENERATIONS}")
 
     # Load checkpoint
-    checkpoint = load_checkpoint()
+    checkpoint = load_checkpoint(CHECKPOINT_PATH)
     completed_set = checkpoint["completed_set"]
 
     if completed_set:
@@ -222,15 +240,15 @@ async def main():
         start_time = time.perf_counter()
 
         try:
-            await process_all(prompts, remaining_indices, checkpoint, stats)
+            await process_all(prompts, remaining_indices, checkpoint, stats, CHECKPOINT_PATH)
         except KeyboardInterrupt:
             print("\n\nInterrupted! Saving checkpoint...")
-            save_checkpoint(checkpoint)
+            save_checkpoint(checkpoint, CHECKPOINT_PATH)
             print(f"Progress saved: {len(checkpoint['completed_set'])}/{total_problems} completed")
             return
         except Exception as e:
             print(f"\n\nError: {e}")
-            save_checkpoint(checkpoint)
+            save_checkpoint(checkpoint, CHECKPOINT_PATH)
             print(f"Progress saved: {len(checkpoint['completed_set'])}/{total_problems} completed")
             raise
 
@@ -264,4 +282,7 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--benchmark", type=str, default="math500", choices=BENCHMARKS.keys())
+    args = parser.parse_args()
+    asyncio.run(main(args.benchmark))
