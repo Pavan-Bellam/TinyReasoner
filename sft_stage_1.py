@@ -46,22 +46,19 @@ def upload_to_s3(local_path: str, s3_path: str, blocking: bool = False):
 class S3UploadCallback(TrainerCallback):
     def __init__(self, s3_base_path: str):
         self.s3_base_path = s3_base_path
-        self.tested = False
+        self.did_first_upload = False
 
     def on_step_end(self, args, state, control, **kwargs):
-        # Upload at first step to verify S3 works
-        if not self.tested and state.global_step == 1:
-            self.tested = True
-            # Force a save at step 1
+        if state.global_step == 1:
             control.should_save = True
         return control
 
     def on_save(self, args, state, control, **kwargs):
         ckpt_dir = f"{args.output_dir}/checkpoint-{state.global_step}"
         s3_dest = f"{self.s3_base_path}checkpoint-{state.global_step}/"
-        # First save is blocking to verify S3 works, rest are background
-        blocking = not self.tested
+        blocking = not self.did_first_upload
         upload_to_s3(ckpt_dir, s3_dest, blocking=blocking)
+        self.did_first_upload = True
         return control
 
 
