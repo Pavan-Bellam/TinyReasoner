@@ -3,22 +3,22 @@ import subprocess
 import threading
 import torch
 from datasets import load_dataset
-from transformers import AutoModelForCausalLM, AutoTokenizer, TrainerCallback, AutoProcessor
+from transformers import AutoModelForCausalLM, AutoTokenizer, TrainerCallback
 from trl import SFTTrainer, SFTConfig
 
 
-MODEL_NAME = "amd/Instella-3B-Instruct"
-OUTPUT_DIR = "./qwen3b-math-sft-stage1"
-DATASET_NAME = "nvidia/OpenMathInstruct-2"
+MODEL_NAME = "open-r1/Qwen2.5-Math-7B-RoPE-300k"
+OUTPUT_DIR = "./ckpts/"
+DATASET_NAME = "open-r1/OpenR1-Math-220k"
 DATASET_CONFIG = "default"
-DATASET_SPLIT = "train_2M"
+DATASET_SPLIT = "train"
 
 SYSTEM_PROMPT = "You are a helpful math reasoning assistant. Solve the problem step by step."
 
-MAX_SEQ_LENGTH = 4096
-PER_DEVICE_BATCH_SIZE = 24
-GRADIENT_ACCUMULATION_STEPS = 11  # 4 GPUs × 4 batch × 32 accum = 512
-LEARNING_RATE = 2e-6  
+MAX_SEQ_LENGTH = 32768
+PER_DEVICE_BATCH_SIZE = 8
+GRADIENT_ACCUMULATION_STEPS = 8  # 4 GPUs × 4 batch × 32 accum = 512
+LEARNING_RATE = 4e-5  
 WEIGHT_DECAY = 0.01  
 NUM_EPOCHS = 1
 WARMUP_STEPS  = 10  # ~3% warmup
@@ -75,22 +75,8 @@ def main(resume_from: str | None = None):
     print("loading dataset....")
     train_dataset = load_dataset(DATASET_NAME, DATASET_CONFIG, split=DATASET_SPLIT)
     print(f"Dataset size: {len(train_dataset)} examples")
+    print(f"Sample messages: {train_dataset[0]['messages'][:1]}")
 
-    def format_to_messages(example):
-        example["messages"] = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": example["problem"]},
-            {"role": "assistant", "content": example["generated_solution"]},
-        ]
-        return example
-
-    train_dataset = train_dataset.map(format_to_messages)
-    print(f"Sample messages: {train_dataset[0]['messages']}")
-
-    processor = AutoProcessor.from_pretrained(
-        MODEL_NAME,
-        trust_remote_code=True,
-    )
     training_args = SFTConfig(
         output_dir=OUTPUT_DIR,
         num_train_epochs=NUM_EPOCHS,
@@ -98,7 +84,7 @@ def main(resume_from: str | None = None):
         gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS,
         learning_rate=LEARNING_RATE,
         max_length=MAX_SEQ_LENGTH,
-        packing=True,
+        packing=False,
         gradient_checkpointing=True,
         bf16=True,
         lr_scheduler_type="cosine",
@@ -118,7 +104,6 @@ def main(resume_from: str | None = None):
         model=model,
         args=training_args,
         train_dataset=train_dataset,
-        processing_class=processor,
         callbacks=[S3UploadCallback(S3_CKPT_PATH)],
     )
 
