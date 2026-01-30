@@ -3,7 +3,7 @@ import subprocess
 import threading
 import torch
 from datasets import load_dataset
-from transformers import AutoModelForCausalLM, AutoTokenizer, TrainerCallback
+from transformers import AutoModelForCausalLM, AutoTokenizer, TrainerCallback, AutoProcessor
 from trl import SFTTrainer, SFTConfig
 
 
@@ -16,8 +16,8 @@ DATASET_SPLIT = "train_2M"
 SYSTEM_PROMPT = "You are a helpful math reasoning assistant. Solve the problem step by step."
 
 MAX_SEQ_LENGTH = 4096
-PER_DEVICE_BATCH_SIZE = 4
-GRADIENT_ACCUMULATION_STEPS = 32  # 4 GPUs × 4 batch × 32 accum = 512
+PER_DEVICE_BATCH_SIZE = 24
+GRADIENT_ACCUMULATION_STEPS = 11  # 4 GPUs × 4 batch × 32 accum = 512
 LEARNING_RATE = 2e-6  
 WEIGHT_DECAY = 0.01  
 NUM_EPOCHS = 1
@@ -67,6 +67,7 @@ def main(resume_from: str | None = None):
         MODEL_NAME,
         dtype=torch.bfloat16,
         attn_implementation="flash_attention_2",
+	 trust_remote_code=True,
     )
 
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
@@ -86,6 +87,10 @@ def main(resume_from: str | None = None):
     train_dataset = train_dataset.map(format_to_messages)
     print(f"Sample messages: {train_dataset[0]['messages']}")
 
+    processor = AutoProcessor.from_pretrained(
+        MODEL_NAME,
+        trust_remote_code=True,
+    )
     training_args = SFTConfig(
         output_dir=OUTPUT_DIR,
         num_train_epochs=NUM_EPOCHS,
@@ -113,6 +118,7 @@ def main(resume_from: str | None = None):
         model=model,
         args=training_args,
         train_dataset=train_dataset,
+        processing_class=processor,
         callbacks=[S3UploadCallback(S3_CKPT_PATH)],
     )
 
