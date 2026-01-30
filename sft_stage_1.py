@@ -7,7 +7,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, TrainerCallback
 from trl import SFTTrainer, SFTConfig
 
 
-MODEL_NAME = "Qwen/Qwen2.5-3B-Instruct"
+MODEL_NAME = "amd/Instella-3B-Instruct"
 OUTPUT_DIR = "./qwen3b-math-sft-stage1"
 DATASET_NAME = "nvidia/OpenMathInstruct-2"
 DATASET_CONFIG = "default"
