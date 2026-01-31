@@ -604,7 +604,9 @@ async def main():
         print(f"Sample response: {test_answer[:200]}")
         print("Server is reachable. Proceeding with benchmarks.\n")
     except Exception as e:
+        import traceback
         print(f"ERROR: Sample test failed: {e}")
+        traceback.print_exc()
         print("Check that vLLM server is running and model name is correct.")
         return
 
