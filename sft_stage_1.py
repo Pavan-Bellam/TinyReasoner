@@ -77,7 +77,7 @@ def main(resume_from: str | None = None, config_path: str = "config.yaml"):
         example["messages"] = [system_msg] + example["messages"]
         return example
 
-    train_dataset = train_dataset.map(add_system_prompt, num_proc=tcfg["dataset_num_proc"])
+    # train_dataset = train_dataset.map(add_system_prompt, num_proc=tcfg["dataset_num_proc"]) #dont add system prompt for now
     print(f"Sample messages: {train_dataset[0]['messages'][:1]}")
 
     training_args = SFTConfig(
