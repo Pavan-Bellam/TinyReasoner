@@ -50,6 +50,7 @@ eval:
       checkpoint_path: "./results/gsm8k_checkpoint.json"
 
 grpo:
+  model_path: "./r1-distill-qwen-1.5b-math"
   output_dir: "./grpo_ckpts/"
   s3_checkpoint_path: "s3://tinyreasoner-1437/grpo/1_5b/ckpts"
   run_name: "qwen1.5b-math-grpo"

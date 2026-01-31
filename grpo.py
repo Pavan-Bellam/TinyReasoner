@@ -7,10 +7,9 @@ import threading
 import torch
 import wandb
 import yaml
-from safetensors.torch import load_file
 from datasets import load_dataset, Dataset, concatenate_datasets
 
-from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig, TrainerCallback
+from transformers import AutoModelForCausalLM, AutoTokenizer, TrainerCallback
 from trl import GRPOTrainer, GRPOConfig
 
 from utils import parse_answer, parse_single_value, compare_parsed, extract_answer
@@ -160,25 +159,20 @@ def make_reward_fn(
     return reward_fn
 
 
-def main(resume_from: str | None = None, load_weights: str | None = None, config_path: str = "config.yaml"):
+def main(resume_from: str | None = None, config_path: str = "config.yaml"):
     with open(config_path, "r") as f:
         cfg = yaml.safe_load(f)
 
-    tcfg = cfg["training"]
     gcfg = cfg["grpo"]
 
-    model_name = tcfg["model_name"]
+    model_name = gcfg["model_path"]
     output_dir = gcfg["output_dir"]
     s3_ckpt_path = gcfg.get("s3_checkpoint_path", "")
 
-    print("Loading Model")
-    config = AutoConfig.from_pretrained(model_name)
-    config.max_position_embeddings = tcfg["max_position_embeddings"]
-    config.rope_theta = tcfg["rope_theta"]
+    print(f"Loading model from {model_name}")
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
         dtype=torch.bfloat16,
-        config=config,
         attn_implementation="flash_attention_2",
         trust_remote_code=True,
     )
@@ -186,13 +180,6 @@ def main(resume_from: str | None = None, load_weights: str | None = None, config
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-
-    if load_weights:
-        ckpt_model_path = f"{load_weights}/model.safetensors"
-        print(f"Loading model weights from {ckpt_model_path}")
-        state_dict = load_file(ckpt_model_path)
-        model.load_state_dict(state_dict)
-        resume_from = None
 
     # --- Load dataset ---
     ds_cfg = gcfg["dataset"]
@@ -286,8 +273,7 @@ def main(resume_from: str | None = None, load_weights: str | None = None, config
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--resume", type=str, default=None, help="Path to checkpoint to resume from")
-    parser.add_argument("--load_weights", type=str, default=None, help="Path to checkpoint dir to load weights only (fresh training start)")
     parser.add_argument("--config", type=str, default="config.yaml", help="Path to YAML config file")
     args = parser.parse_args()
 
-    main(resume_from=args.resume, load_weights=args.load_weights, config_path=args.config)
+    main(resume_from=args.resume, config_path=args.config)
