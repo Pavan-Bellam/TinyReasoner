@@ -337,14 +337,13 @@ def save_checkpoint(checkpoint: dict, path: str):
         json.dump(save_data, f)
 
 
-async def generate_single(client, model_name: str, system_prompt: str, prompt: str, max_retries: int, max_tokens: int = 30768) -> tuple[str, RequestMetrics]:
+async def generate_single(client, model_name: str, prompt: str, max_retries: int, max_tokens: int = 30768) -> tuple[str, RequestMetrics]:
     for attempt in range(max_retries):
         try:
             start = time.perf_counter()
             response = await client.chat.completions.create(
                 model=model_name,
                 messages=[
-                    {"role": "system", "content": system_prompt},
                     {"role": "user", "content": prompt},
                 ],
                 max_tokens=max_tokens,
@@ -371,7 +370,6 @@ async def generate_single(client, model_name: str, system_prompt: str, prompt: s
 async def process_all(
     client,
     model_name: str,
-    system_prompt: str,
     prompts: list[str],
     indices: list[int],
     checkpoint: dict,
@@ -390,7 +388,7 @@ async def process_all(
         nonlocal completed_count, last_checkpoint_count
         prompt = prompts[idx]
         async with semaphore:
-            result, metrics = await generate_single(client, model_name, system_prompt, prompt, max_retries)
+            result, metrics = await generate_single(client, model_name, prompt, max_retries)
 
             async with checkpoint_lock:
                 checkpoint["results"][str(idx)] = result
@@ -441,7 +439,7 @@ def save_report(report: list, path: str):
 # ============================================================
 # Main
 # ============================================================
-async def run_benchmark(benchmark_name: str, bench: dict, client, model_name: str, system_prompt: str, eval_cfg: dict, run_name: str):
+async def run_benchmark(benchmark_name: str, bench: dict, client, model_name: str, eval_cfg: dict, run_name: str):
     ds_name = bench["dataset"]
     ds_config = bench.get("dataset_config")
     ds_split = bench["dataset_split"]
@@ -479,7 +477,7 @@ async def run_benchmark(benchmark_name: str, bench: dict, client, model_name: st
 
         try:
             await process_all(
-                client, model_name, system_prompt, prompts, remaining_indices,
+                client, model_name, prompts, remaining_indices,
                 checkpoint, stats, CKPT_PATH,
                 max_concurrent=eval_cfg["max_concurrent"],
                 max_retries=eval_cfg["max_retries"],
@@ -579,7 +577,6 @@ async def main():
     with open(args.config, "r") as f:
         cfg = yaml.safe_load(f)
 
-    system_prompt = cfg["system_prompt"]
     eval_cfg = cfg["eval"]
 
     vllm_url = args.vllm_url if args.vllm_url else eval_cfg["vllm_url"]
@@ -593,12 +590,30 @@ async def main():
     print(f"Model: {model_name}")
     print(f"vLLM: {vllm_url}")
 
+    # Sample test: verify vLLM server is reachable
+    print("\nSample test: asking 'What is 2+3?'...")
+    try:
+        test_response = await client.chat.completions.create(
+            model=model_name,
+            messages=[
+                {"role": "user", "content": "What is 2+3?"},
+            ],
+            max_tokens=256,
+        )
+        test_answer = test_response.choices[0].message.content or ""
+        print(f"Sample response: {test_answer[:200]}")
+        print("Server is reachable. Proceeding with benchmarks.\n")
+    except Exception as e:
+        print(f"ERROR: Sample test failed: {e}")
+        print("Check that vLLM server is running and model name is correct.")
+        return
+
     # Load existing report
     report = load_report(report_path)
 
     for benchmark_name, bench in benchmarks.items():
         try:
-            entry = await run_benchmark(benchmark_name, bench, client, model_name, system_prompt, eval_cfg, args.run_name)
+            entry = await run_benchmark(benchmark_name, bench, client, model_name, eval_cfg, args.run_name)
             report.append(entry)
             save_report(report, report_path)
         except KeyboardInterrupt:
