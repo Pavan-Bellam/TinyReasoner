@@ -29,11 +29,6 @@ class S3UploadCallback(TrainerCallback):
     def __init__(self, s3_base_path: str):
         self.s3_base_path = s3_base_path
 
-    def on_step_end(self, args, state, control, **kwargs):
-        if state.global_step == 1:
-            control.should_save = True
-        return control
-
     def on_save(self, args, state, control, **kwargs):
         if not state.is_world_process_zero:
             return control
