@@ -1,7 +1,7 @@
 system_prompt: "You are a helpful math reasoning assistant. Solve the problem step by step."
 
 training:
-  model_name: "open-r1/Qwen2.5-Math-7B-RoPE-300k"
+  model_name: "Qwen/Qwen2.5-Math-1.5B"
   max_position_embeddings: 32768
   rope_theta: 300000.0
   output_dir: "./ckpts/"
@@ -11,9 +11,9 @@ training:
   max_seq_length: 32768
   per_device_batch_size: 4
   gradient_accumulation_steps: 8
-  learning_rate: 4e-5
+  learning_rate: 5e-5
   weight_decay: 0.01
-  num_epochs: 1
+  num_epochs: 2
   warmup_steps: 10
   logging_steps: 5
   save_steps: 50
