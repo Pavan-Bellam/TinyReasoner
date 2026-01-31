@@ -13,7 +13,7 @@ from datasets import load_dataset, Dataset, concatenate_datasets
 from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig, TrainerCallback
 from trl import GRPOTrainer, GRPOConfig
 
-from utils import parse_answer, compare_parsed, extract_answer
+from utils import parse_answer, parse_single_value, compare_parsed, extract_answer
 
 
 def upload_to_s3(local_path: str, s3_path: str, blocking: bool = False):
@@ -98,7 +98,7 @@ def make_reward_fn(
 
         for i, (completion, gt) in enumerate(zip(completions, answer)):
             parsed_pred = parse_answer(completion)
-            parsed_gt = parse_answer(gt)
+            parsed_gt = parse_single_value(gt)
             is_correct = False
 
             level = _parse_level(levels[i])
