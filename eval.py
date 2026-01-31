@@ -337,7 +337,7 @@ def save_checkpoint(checkpoint: dict, path: str):
         json.dump(save_data, f)
 
 
-async def generate_single(client, model_name: str, prompt: str, max_retries: int, max_tokens: int = 30768) -> tuple[str, RequestMetrics]:
+async def generate_single(client, model_name: str, prompt: str, max_retries: int, max_tokens: int = 2096) -> tuple[str, RequestMetrics]:
     for attempt in range(max_retries):
         try:
             start = time.perf_counter()
