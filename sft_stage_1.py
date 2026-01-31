@@ -3,6 +3,7 @@ import subprocess
 import threading
 import torch
 import yaml
+from safetensors.torch import load_file
 from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer, TrainerCallback, AutoConfig
 from trl import SFTTrainer, SFTConfig
@@ -38,7 +39,7 @@ class S3UploadCallback(TrainerCallback):
         return control
 
 
-def main(resume_from: str | None = None, config_path: str = "config.yaml"):
+def main(resume_from: str | None = None, load_weights: str | None = None, config_path: str = "config.yaml"):
     with open(config_path, "r") as f:
         cfg = yaml.safe_load(f)
 
@@ -98,6 +99,13 @@ def main(resume_from: str | None = None, config_path: str = "config.yaml"):
         weight_decay=tcfg["weight_decay"],
     )
 
+    if load_weights:
+        ckpt_model_path = f"{load_weights}/model.safetensors"
+        print(f"Loading model weights from {ckpt_model_path}")
+        state_dict = load_file(ckpt_model_path)
+        model.load_state_dict(state_dict)
+        resume_from = None  # Fresh start, don't resume optimizer/scheduler state
+
     trainer = SFTTrainer(
         model=model,
         args=training_args,
@@ -117,7 +125,8 @@ def main(resume_from: str | None = None, config_path: str = "config.yaml"):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--resume", type=str, default=None, help="Path to checkpoint to resume from")
+    parser.add_argument("--load_weights", type=str, default=None, help="Path to checkpoint dir to load weights only (fresh training start)")
     parser.add_argument("--config", type=str, default="config.yaml", help="Path to YAML config file")
     args = parser.parse_args()
 
-    main(resume_from=args.resume, config_path=args.config)
+    main(resume_from=args.resume, load_weights=args.load_weights, config_path=args.config)
