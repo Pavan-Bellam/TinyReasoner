@@ -2,28 +2,10 @@ import argparse
 import subprocess
 import threading
 import torch
+import yaml
 from datasets import load_dataset
-from transformers import AutoModelForCausalLM, AutoTokenizer, TrainerCallback
+from transformers import AutoModelForCausalLM, AutoTokenizer, TrainerCallback, AutoConfig
 from trl import SFTTrainer, SFTConfig
-
-
-MODEL_NAME = "open-r1/Qwen2.5-Math-7B-RoPE-300k"
-OUTPUT_DIR = "./ckpts/"
-DATASET_NAME = "open-r1/OpenR1-Math-220k"
-DATASET_CONFIG = "default"
-DATASET_SPLIT = "train"
-
-SYSTEM_PROMPT = "You are a helpful math reasoning assistant. Solve the problem step by step."
-
-MAX_SEQ_LENGTH = 32768
-PER_DEVICE_BATCH_SIZE = 8
-GRADIENT_ACCUMULATION_STEPS = 8  # 4 GPUs × 4 batch × 32 accum = 512
-LEARNING_RATE = 4e-5  
-WEIGHT_DECAY = 0.01  
-NUM_EPOCHS = 1
-WARMUP_STEPS  = 10  # ~3% warmup
-
-S3_CKPT_PATH = "s3://tinyreasoner-1437/stage-1/ckpts/"
 
 
 def upload_to_s3(local_path: str, s3_path: str, blocking: bool = False):
@@ -61,64 +43,86 @@ class S3UploadCallback(TrainerCallback):
         return control
 
 
-def main(resume_from: str | None = None):
+def main(resume_from: str | None = None, config_path: str = "config.yaml"):
+    with open(config_path, "r") as f:
+        cfg = yaml.safe_load(f)
+
+    system_prompt = cfg["system_prompt"]
+    tcfg = cfg["training"]
+
+    model_name = tcfg["model_name"]
+    output_dir = tcfg["output_dir"]
+    s3_ckpt_path = tcfg["s3_checkpoint_path"]
+
     print('Loading Model')
+    config = AutoConfig.from_pretrained(model_name)
+    config.max_position_embeddings = tcfg["max_position_embeddings"]
+    config.rope_theta = tcfg["rope_theta"]
     model = AutoModelForCausalLM.from_pretrained(
-        MODEL_NAME,
+        model_name,
         dtype=torch.bfloat16,
+        config=config,
         attn_implementation="flash_attention_2",
-	 trust_remote_code=True,
+	    trust_remote_code=True,
     )
 
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
 
     print("loading dataset....")
-    train_dataset = load_dataset(DATASET_NAME, DATASET_CONFIG, split=DATASET_SPLIT)
+    train_dataset = load_dataset(tcfg["dataset_name"], tcfg["dataset_config"], split=tcfg["dataset_split"])
     print(f"Dataset size: {len(train_dataset)} examples")
+
+    def add_system_prompt(example):
+        system_msg = {"role": "system", "content": system_prompt}
+        example["messages"] = [system_msg] + example["messages"]
+        return example
+
+    train_dataset = train_dataset.map(add_system_prompt, num_proc=tcfg["dataset_num_proc"])
     print(f"Sample messages: {train_dataset[0]['messages'][:1]}")
 
     training_args = SFTConfig(
-        output_dir=OUTPUT_DIR,
-        num_train_epochs=NUM_EPOCHS,
-        per_device_train_batch_size=PER_DEVICE_BATCH_SIZE,
-        gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS,
-        learning_rate=LEARNING_RATE,
-        max_length=MAX_SEQ_LENGTH,
-        packing=False,
+        output_dir=output_dir,
+        num_train_epochs=tcfg["num_epochs"],
+        per_device_train_batch_size=tcfg["per_device_batch_size"],
+        gradient_accumulation_steps=tcfg["gradient_accumulation_steps"],
+        learning_rate=tcfg["learning_rate"],
+        max_length=tcfg["max_seq_length"],
+        packing=tcfg["packing"],
         gradient_checkpointing=True,
         bf16=True,
-        lr_scheduler_type="cosine",
-        warmup_steps=WARMUP_STEPS,
-        logging_steps=5,
+        lr_scheduler_type="linear",
+        warmup_steps=tcfg["warmup_steps"],
+        logging_steps=tcfg["logging_steps"],
         save_strategy="steps",
-        save_steps=50,
-        save_total_limit=3,
-        seed=42,
+        save_steps=tcfg["save_steps"],
+        save_total_limit=tcfg["save_total_limit"],
+        seed=tcfg["seed"],
         report_to="wandb",
-        run_name="qwen3b-math-sft-stage1",
-	dataset_num_proc = 128,
-	weight_decay=WEIGHT_DECAY
+        run_name=tcfg["run_name"],
+        dataset_num_proc=tcfg["dataset_num_proc"],
+        weight_decay=tcfg["weight_decay"],
     )
 
     trainer = SFTTrainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
-        callbacks=[S3UploadCallback(S3_CKPT_PATH)],
+        callbacks=[S3UploadCallback(s3_ckpt_path)],
     )
 
     print("Starting Training")
     trainer.train(resume_from_checkpoint=resume_from)
 
     print("Saving Model")
-    trainer.save_model(f"{OUTPUT_DIR}/final")
-    tokenizer.save_pretrained(f"{OUTPUT_DIR}/final")
-    upload_to_s3(f"{OUTPUT_DIR}/final", f"{S3_CKPT_PATH}final/", blocking=True)
+    trainer.save_model(f"{output_dir}/final")
+    tokenizer.save_pretrained(f"{output_dir}/final")
+    upload_to_s3(f"{output_dir}/final", f"{s3_ckpt_path}final/", blocking=True)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--resume", type=str, default=None, help="Path to checkpoint to resume from")
+    parser.add_argument("--config", type=str, default="config.yaml", help="Path to YAML config file")
     args = parser.parse_args()
 
-    main(resume_from=args.resume)
+    main(resume_from=args.resume, config_path=args.config)

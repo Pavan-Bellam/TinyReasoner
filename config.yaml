@@ -1,0 +1,50 @@
+system_prompt: "You are a helpful math reasoning assistant. Solve the problem step by step."
+
+training:
+  model_name: "open-r1/Qwen2.5-Math-7B-RoPE-300k"
+  max_position_embeddings: 32768
+  rope_theta: 300000.0
+  output_dir: "./ckpts/"
+  dataset_name: "open-r1/OpenR1-Math-220k"
+  dataset_config: "default"
+  dataset_split: "train"
+  max_seq_length: 32768
+  per_device_batch_size: 4
+  gradient_accumulation_steps: 8
+  learning_rate: 4e-5
+  weight_decay: 0.01
+  num_epochs: 1
+  warmup_steps: 10
+  logging_steps: 5
+  save_steps: 50
+  save_total_limit: 3
+  seed: 42
+  packing: false
+  dataset_num_proc: 32
+  run_name: "qwen1.5b-math-sft"
+  s3_checkpoint_path: "s3://tinyreasoner-1437/sft/1_5b/ckpts/"
+
+eval:
+  vllm_url: "https://localhost:8000/v1"
+  model_name: ""
+  max_concurrent: 100
+  max_retries: 3
+  checkpoint_interval: 20
+  report_path: "./results/eval_report.json"
+  benchmarks:
+    math500:
+      dataset: "HuggingFaceH4/MATH-500"
+      dataset_config: null
+      dataset_split: "test"
+      prompt_col: "problem"
+      gt_col: "solution"
+      output_path: "./results/math500"
+      checkpoint_path: "./results/math500_checkpoint.json"
+    gsm8k:
+      dataset: "openai/gsm8k"
+      dataset_config: "main"
+      dataset_split: "test"
+      prompt_col: "question"
+      gt_col: "answer"
+      output_path: "./results/gsm8k"
+      checkpoint_path: "./results/gsm8k_checkpoint.json"
