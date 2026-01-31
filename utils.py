@@ -104,7 +104,7 @@ def extract_answer(text: str) -> str | None:
     raw = extract_raw_boxed(text)
     if raw is None:
         return None
-    if parse_answer(raw) is not None:
+    if parse_single_value(raw) is not None:
         return raw
     return None
 
