@@ -1,6 +1,6 @@
 """Debug script to see what's happening with answer extraction on hendrycks_math."""
 from datasets import load_dataset, concatenate_datasets
-from utils import extract_raw_boxed, extract_answer, parse_answer
+from utils import extract_raw_boxed, extract_answer, parse_answer, parse_single_value
 
 SUBSETS = [
     "algebra",
@@ -32,11 +32,12 @@ def main():
                 failures.append({"idx": i, "reason": "no_boxed", "solution": solution[:300]})
             continue
 
-        parsed = parse_answer(raw)
+        # parse_single_value works on bare content (no \boxed{} wrapper)
+        parsed = parse_single_value(raw)
         if parsed is None:
             boxed_but_no_parse += 1
-            if len(failures) < 20:
-                failures.append({"idx": i, "reason": "parse_failed", "raw_boxed": raw, "solution": solution[:300]})
+            if len(failures) < 30:
+                failures.append({"idx": i, "reason": "parse_failed", "raw_boxed": raw})
             continue
 
         parsed_ok += 1
@@ -48,16 +49,22 @@ def main():
     print(f"Parsed OK:                {parsed_ok:>6} / {total} ({100*parsed_ok/total:.1f}%)")
     print(f"{'='*60}")
 
-    # Also check extract_answer (the combined function used in grpo.py)
-    extract_ok = sum(1 for ex in ds if extract_answer(ex["solution"]) is not None)
-    print(f"extract_answer() OK:      {extract_ok:>6} / {total} ({100*extract_ok/total:.1f}%)")
+    # Also verify parse_answer on full solution text (like eval.py does)
+    full_parse_ok = sum(1 for ex in ds if parse_answer(ex["solution"]) is not None)
+    print(f"parse_answer(solution):   {full_parse_ok:>6} / {total} ({100*full_parse_ok/total:.1f}%)")
 
-    print(f"\n--- Sample failures ---")
-    for f in failures:
-        print(f"\n[{f['reason']}] idx={f['idx']}")
-        if "raw_boxed" in f:
-            print(f"  raw_boxed: {f['raw_boxed']}")
-        print(f"  solution:  {f['solution'][:200]}...")
+    # And extract_answer (the function grpo.py uses)
+    extract_ok = sum(1 for ex in ds if extract_answer(ex["solution"]) is not None)
+    print(f"extract_answer(solution): {extract_ok:>6} / {total} ({100*extract_ok/total:.1f}%)")
+
+    if failures:
+        print(f"\n--- Sample parse failures ({len(failures)}) ---")
+        for f in failures:
+            print(f"\n[{f['reason']}] idx={f['idx']}")
+            if "raw_boxed" in f:
+                print(f"  raw_boxed: {f['raw_boxed']}")
+            if "solution" in f:
+                print(f"  solution:  {f['solution'][:200]}...")
 
 
 if __name__ == "__main__":
