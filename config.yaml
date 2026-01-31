@@ -48,3 +48,41 @@ eval:
       gt_col: "answer"
       output_path: "./results/gsm8k"
       checkpoint_path: "./results/gsm8k_checkpoint.json"
+
+grpo:
+  output_dir: "./grpo_ckpts/"
+  s3_checkpoint_path: "s3://tinyreasoner-1437/grpo/1_5b/ckpts"
+  run_name: "qwen1.5b-math-grpo"
+  dataset:
+    name: "EleutherAI/hendrycks_math"
+    subsets:
+      - algebra
+      - counting_and_probability
+      - geometry
+      - intermediate_algebra
+      - number_theory
+      - prealgebra
+      - precalculus
+    split: "train"
+    prompt_col: "problem"       # raw column in dataset
+    solution_col: "solution"    # column to extract boxed answer from
+    level_col: "level"          # column with difficulty level (1-5) for length penalty
+  num_generations: 8
+  max_prompt_length: 1024
+  max_completion_length: 32768
+  temperature: 0.7
+  learning_rate: 0.00001
+  per_device_batch_size: 4
+  gradient_accumulation_steps: 16
+  max_steps: 1000
+  max_grad_norm: 1.0
+  lr_scheduler_type: "linear"
+  warmup_steps: 10
+  logging_steps: 5
+  save_steps: 50
+  save_total_limit: 3
+  seed: 42
+  correct_reward: 1.0
+  wrong_reward: 0.0
+  invalid_format_reward: -0.05
+  debug_generations_path: null
