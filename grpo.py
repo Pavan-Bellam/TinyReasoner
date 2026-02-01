@@ -1,6 +1,7 @@
 import argparse
 import json
 import re
+import signal
 import subprocess
 import threading
 
@@ -13,6 +14,28 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, TrainerCallback
 from trl import GRPOTrainer, GRPOConfig
 
 from utils import parse_answer, parse_single_value, compare_parsed, extract_answer
+
+
+class _Timeout(Exception):
+    pass
+
+
+def _timeout_handler(signum, frame):
+    raise _Timeout()
+
+
+def parse_with_timeout(fn, text, timeout=3):
+    """Call fn(text) with a timeout. Returns None if it takes too long."""
+    old_handler = signal.signal(signal.SIGALRM, _timeout_handler)
+    signal.alarm(timeout)
+    try:
+        result = fn(text)
+    except _Timeout:
+        result = None
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old_handler)
+    return result
 
 
 def upload_to_s3(local_path: str, s3_path: str, blocking: bool = False):
@@ -97,8 +120,8 @@ def make_reward_fn(
         levels = kwargs.get(level_col, [1] * len(completions))
 
         for i, (completion, gt) in enumerate(zip(completions, answer)):
-            parsed_pred = parse_answer(completion)
-            parsed_gt = parse_single_value(gt)
+            parsed_pred = parse_with_timeout(parse_answer, completion)
+            parsed_gt = parse_with_timeout(parse_single_value, gt)
             has_think = bool(re.search(r"<think>.+?</think>", completion, re.DOTALL))
             is_correct = False
 
@@ -197,15 +220,23 @@ def main(resume_from: str | None = None, config_path: str = "config.yaml"):
         train_dataset = load_dataset(ds_cfg["name"], ds_cfg.get("config"), split=ds_cfg["split"])
     print(f"Raw dataset size: {len(train_dataset)} examples")
 
-    # Extract boxed answers and filter unparseable
-    solution_col = ds_cfg["solution_col"]
-    def add_answer(example):
-        example["answer"] = extract_answer(example[solution_col])
-        return example
-    train_dataset = train_dataset.map(add_answer)
-    before = len(train_dataset)
-    train_dataset = train_dataset.filter(lambda x: x["answer"] is not None)
-    print(f"After filtering unparseable: {len(train_dataset)} / {before} examples")
+    # Prepare answer column
+    answer_col = ds_cfg["answer_col"]
+    solution_col = ds_cfg.get("solution_col")
+
+    if solution_col:
+        # Extract boxed answers from solution column
+        def add_answer(example):
+            example["answer"] = extract_answer(example[solution_col])
+            return example
+        train_dataset = train_dataset.map(add_answer)
+        before = len(train_dataset)
+        train_dataset = train_dataset.filter(lambda x: x["answer"] is not None)
+        print(f"After filtering unparseable: {len(train_dataset)} / {before} examples")
+    else:
+        # Answer column already has plain string answers
+        if answer_col != "answer":
+            train_dataset = train_dataset.rename_column(answer_col, "answer")
 
     # Rename and format prompt column for GRPOTrainer
     prompt_col = ds_cfg["prompt_col"]
