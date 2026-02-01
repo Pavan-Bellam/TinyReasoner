@@ -99,7 +99,7 @@ def make_reward_fn(
         for i, (completion, gt) in enumerate(zip(completions, answer)):
             parsed_pred = parse_answer(completion)
             parsed_gt = parse_single_value(gt)
-            has_think = "<think>" in completion
+            has_think = bool(re.search(r"<think>.+?</think>", completion, re.DOTALL))
             is_correct = False
 
             level = _parse_level(levels[i])
@@ -213,7 +213,12 @@ def main(resume_from: str | None = None, config_path: str = "config.yaml"):
         train_dataset = train_dataset.rename_column(prompt_col, "prompt")
 
     def format_prompt(example):
-        example["prompt"] = [{"role": "user", "content": example["prompt"]}]
+        formatted = tokenizer.apply_chat_template(
+            [{"role": "user", "content": example["prompt"]}],
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+        example["prompt"] = formatted
         return example
     train_dataset = train_dataset.map(format_prompt)
     print(f"Final dataset size: {len(train_dataset)} examples")
@@ -264,7 +269,6 @@ def main(resume_from: str | None = None, config_path: str = "config.yaml"):
         model=model,
         args=training_args,
         train_dataset=train_dataset,
-        processing_class=tokenizer,
         reward_funcs=[reward_fn],
         callbacks=callbacks,
     )
