@@ -85,7 +85,7 @@ def make_reward_fn(
     """
     batch_idx = [0]
 
-    def reward_fn(completions: list[str], answer: list[str], prompt: list[str] | None = None, **kwargs) -> list[float]:
+    def reward_fn(completions: list[str], answer: list[str], **kwargs) -> list[float]:
         rewards = []
         correct_count = 0
         format_valid_count = 0
@@ -93,11 +93,13 @@ def make_reward_fn(
         total_token_length = 0
         debug_records = []
 
+        prompts = kwargs.get("prompt", [None] * len(completions))
         levels = kwargs.get(level_col, [1] * len(completions))
 
         for i, (completion, gt) in enumerate(zip(completions, answer)):
             parsed_pred = parse_answer(completion)
             parsed_gt = parse_single_value(gt)
+            has_think = "<think>" in completion
             is_correct = False
 
             level = _parse_level(levels[i])
@@ -106,7 +108,7 @@ def make_reward_fn(
             total_length_penalty += length_penalty
             total_token_length += token_length
 
-            if parsed_pred is None:
+            if parsed_pred is None or not has_think:
                 reward = invalid_format_reward
             else:
                 format_valid_count += 1
@@ -115,19 +117,21 @@ def make_reward_fn(
                     correct_count += 1
                     is_correct = True
                 else:
-                    reward = wrong_reward - length_penalty
+                    reward = wrong_reward
             rewards.append(reward)
 
             if debug_path:
                 debug_records.append({
                     "batch": batch_idx[0],
                     "idx": i,
-                    "prompt": prompt[i] if prompt else None,
+                    "prompt": prompts[i],
                     "completion": completion,
                     "expected": gt,
                     "parsed_pred": str(parsed_pred),
                     "parsed_gt": str(parsed_gt),
-                    "format_valid": parsed_pred is not None,
+                    "has_think": has_think,
+                    "has_boxed": parsed_pred is not None,
+                    "format_valid": parsed_pred is not None and has_think,
                     "correct": is_correct,
                     "reward": reward,
                     "level": level,
@@ -203,10 +207,15 @@ def main(resume_from: str | None = None, config_path: str = "config.yaml"):
     train_dataset = train_dataset.filter(lambda x: x["answer"] is not None)
     print(f"After filtering unparseable: {len(train_dataset)} / {before} examples")
 
-    # Rename columns to what GRPOTrainer expects: "prompt" and "answer"
+    # Rename and format prompt column for GRPOTrainer
     prompt_col = ds_cfg["prompt_col"]
     if prompt_col != "prompt":
         train_dataset = train_dataset.rename_column(prompt_col, "prompt")
+
+    def format_prompt(example):
+        example["prompt"] = [{"role": "user", "content": example["prompt"]}]
+        return example
+    train_dataset = train_dataset.map(format_prompt)
     print(f"Final dataset size: {len(train_dataset)} examples")
 
     # --- Training args ---
