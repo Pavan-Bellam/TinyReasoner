@@ -356,7 +356,7 @@ async def run_benchmark(benchmark_name: str, bench: dict, client, model_name: st
     # --- Evaluation phase ---
     print(f"\nEvaluating {benchmark_name}...")
 
-    if benchmark_name == "math500":
+    if benchmark_name in ("math500", "aime24"):
         levels = list(dataset["level"]) if "level" in dataset.column_names else None
         eval_result, correct_list = evaluate_math500(all_responses, list(gt_answers), levels)
     elif benchmark_name == "gsm8k":
@@ -410,6 +410,7 @@ async def main():
     parser.add_argument("--run_name", type=str, required=True, help="Name for this eval run (e.g. 'ck-2800' or 'base')")
     parser.add_argument("--vllm_url", type=str, default=None, help="vLLM server URL (overrides config)")
     parser.add_argument("--model", type=str, default=None, help="Model name on vLLM server (overrides config)")
+    parser.add_argument("--benchmark", type=str, default=None, help="Run only this benchmark (e.g. 'math500', 'gsm8k', 'aime24'). Default: run all")
     parser.add_argument("--config", type=str, default="config.yaml", help="Path to YAML config file")
     args = parser.parse_args()
 
@@ -422,6 +423,12 @@ async def main():
     model_name = args.model if args.model else eval_cfg["model_name"]
     report_path = eval_cfg["report_path"]
     benchmarks = eval_cfg["benchmarks"]
+
+    if args.benchmark:
+        if args.benchmark not in benchmarks:
+            print(f"Unknown benchmark: {args.benchmark}. Available: {list(benchmarks.keys())}")
+            return
+        benchmarks = {args.benchmark: benchmarks[args.benchmark]}
 
     client = AsyncOpenAI(base_url=vllm_url, api_key="dummy", timeout=300)
 

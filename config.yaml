@@ -48,6 +48,14 @@ eval:
       gt_col: "answer"
       output_path: "./results/gsm8k"
       checkpoint_path: "./results/gsm8k_checkpoint.json"
+    aime24:
+      dataset: "math-ai/aime24"
+      dataset_config: null
+      dataset_split: "test"
+      prompt_col: "question"
+      gt_col: "solution"
+      output_path: "./results/aime24"
+      checkpoint_path: "./results/aime24_checkpoint.json"
 
 grpo:
   model_path: "./r1-distill-qwen-1.5b-math"
@@ -66,11 +74,12 @@ grpo:
       - precalculus
     split: "train"
     prompt_col: "problem"       # raw column in dataset
-    solution_col: "solution"    # column to extract boxed answer from
+    answer_col: "answer"        # column with plain string answers (used when solution_col is null)
+    solution_col: "solution"    # column to extract boxed answer from (set to null if answer_col has plain answers)
     level_col: "level"          # column with difficulty level (1-5) for length penalty
   num_generations: 8
   max_prompt_length: 1024
-  max_completion_length: 32768
+  max_completion_length: 16384
   temperature: 0.7
   learning_rate: 0.00001
   per_device_batch_size: 4
