@@ -53,14 +53,19 @@ def main(resume_from: str | None = None, load_weights: str | None = None, config
     print('Loading Model')
     config = AutoConfig.from_pretrained(model_name)
     config.max_position_embeddings = tcfg["max_position_embeddings"]
-    config.rope_theta = tcfg["rope_theta"]
+    config.rope_scaling = tcfg["rope_scaling"]
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
         dtype=torch.bfloat16,
         config=config,
         attn_implementation="flash_attention_2",
-	    trust_remote_code=True,
+        trust_remote_code=True,
     )
+
+    # Verify rope config
+    for k, v in model.config.to_dict().items():
+        if 'rope' in k.lower():
+            print(f"  {k}: {v}")
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
 
